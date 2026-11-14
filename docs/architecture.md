@@ -1,6 +1,6 @@
 # Rukh executable: architecture and build path
 
-Status: design, 2026-11-13. Nothing in this file has been built yet. Crate versions were compiled in throwaway probes on Windows only. Items nobody has checked are marked UNVERIFIED.
+Status: the original design plan (2026-11-13), since partly built. It is kept as a record of the plan; where it and the code disagree (flag names, file names, steps), the code wins. [program.md](program.md) and [core.md](core.md) describe what exists. Crate versions were compiled in throwaway probes on Windows only. Items nobody has checked are marked UNVERIFIED.
 
 ## 0. What this is
 
@@ -175,7 +175,7 @@ Unchanged: `three/pieceLayer.js`, `three/board.js`, `three/pieces.js`, `three/ma
 
 ### Tests
 
-A static count found 318 tests; the brief says 322. UNVERIFIED which is right. Rule for every step: `npm test` and `cargo test --workspace` pass before the step is done.
+A static count found 318 tests; an earlier count said 322. UNVERIFIED which is right. Rule for every step: `npm test` and `cargo test --workspace` pass before the step is done.
 
 - Unchanged: interact 47, piece-layer 15, view-modes 38, board-mapping 6, pieces-profiles 37 (one Game use becomes a piece list), uci 49, packet 29 (only the createApi cases become async).
 - Rewritten: core-store 36, against a fake backend. New: gameView tests on a snapshot fixture written by `cargo test`; "an eval frame during a drag emits no game:change".
@@ -260,7 +260,7 @@ Prompts (rmcp `#[prompt_router]`, stacked with `#[tool_handler]` on one impl):
 - `play {side?}`: the play loop in three sentences.
 - `review {level?}`: the same loop with `for=any_change`, plus guidance for annotate, evaluate and navigate. Named `review` so that "coach" means only the style.
 
-Server instructions: the loop in two sentences; "the board owns the style; read style.name and style.rule in each result"; then the three rules verbatim from `docs/web-contract.md:740-746` (silent, annotate, coach). `style.rule` rides in every `wait` and `get_game` result, so a client that shows neither instructions nor prompts still gets it.
+Server instructions: the loop in two sentences; "the board owns the style; read style.name and style.rule in each result"; then the three rules verbatim from the style contract in `docs/web-contract.md` (silent, annotate, coach). `style.rule` rides in every `wait` and `get_game` result, so a client that shows neither instructions nor prompts still gets it.
 
 ### Presence
 
@@ -280,7 +280,7 @@ Every window shows one chip in the top bar: "No AI connected", "<name> connected
 
 ## 8. Opening the board
 
-- Data folder (hand-rolled, no crate): Windows `%APPDATA%/Rukh`; macOS `~/Library/Application Support/Rukh`; Linux `$XDG_CONFIG_HOME/rukh` or `~/.config/rukh`. Files: `settings.json`, `session.json`, `instance.json`. All written temp file + rename.
+- Data folder (hand-rolled, no crate): Windows `%LOCALAPPDATA%\Rukh`; macOS `~/Library/Application Support/Rukh`; Linux `$XDG_DATA_HOME/rukh` or `~/.local/share/rukh` (as in [program.md](program.md) and `default_data_dir` in `open.rs`). Files: `settings.json`, `session.json`, `instance.json`. All written temp file + rename.
 - `settings.json`: `{"open_in":"browser"|"window","port":47474,"open_on_start":true,"art_dir":null,"page":{...}}`. `page` holds the board's own settings object (theme, piece set, lighting), so the browser, the dedicated window and any other origin look the same. localStorage keeps only the in-page chat key, and everything in the serverless demo. On first connect, if the session is new and the page still holds an old `chessboard.study`, it offers once to load it.
 - Routes: `GET /api/hello` -> `{app:"rukh", version, proto, instance, port, pipe_port, link}`; `GET /api/ws`; `GET`/`POST /api/settings`; `POST /api/open {in?}`; `POST /api/quit`; `GET /api/mcp-config`; `/mcp`; `/art/*`; everything else from the embedded app.
 - The link is `http://127.0.0.1:<port>/`, no token. It is printed at start, returned by `/api/hello` and `open_board`, and shown in the settings panel with a Copy button.
@@ -318,7 +318,7 @@ Enforcement, so a local build cannot leak art either:
 - `crates/rukh/build.rs` fails the compile if `webdist` holds any file outside the allow-list above, or if `app.js` contains `Z2xURg` (base64 of "glTF"), `Iz9SQURJQU5D` (base64 of "#?RADIANCE"), or `data:image/jpeg`. CI runs the same check.
 - Step 4 also updates the paths in `LICENSE-ART.md`, `NOTICE.md` and the README.
 
-Open point carried to the owner list: the flat 2D glyphs inside `app.js` are listed in `NOTICE.md` as CC BY-SA 3.0, which is not a licence for material compiled into a GPL program. Whether the source also grants GPL or BSD is UNVERIFIED.
+Open point, also in section 13: the flat 2D glyphs inside `app.js` are listed in `NOTICE.md` as CC BY-SA 3.0, which is not a licence for material compiled into a GPL program. Whether the source also grants GPL or BSD is UNVERIFIED.
 
 ## 10. Security of the local server
 
@@ -373,9 +373,9 @@ Each step is one sitting. The board works after each.
     Verify: Windows by hand (window opens, board renders, Stockfish runs, closing the window keeps the game). macOS and Linux when testers exist.
 14. **CI and release packaging.**
 
-## 13. Questions for the owner
+## 13. Open questions
 
-1. **Coach and the engine.** The coach rule says "judgement call, not an engine verdict", and evaluations are now offered over MCP. Recommendation: keep the sentence and add "the coach may call evaluate to check its own judgement before calling a move a mistake; the note is still in its own words". The final wording is the owner's.
+1. **Coach and the engine.** The coach rule says "judgement call, not an engine verdict", and evaluations are now offered over MCP. Recommendation: keep the sentence and add "the coach may call evaluate to check its own judgement before calling a move a mistake; the note is still in its own words". The final wording is the maintainer's.
 2. **The single-file `chessboard.html`.** Today's build inlines every art file into it, which cannot continue. Recommendation: let it go; the hosted demo replaces it. The alternative is an art-free single file (procedural pieces, core wasm inlined), which costs a build path to maintain.
 3. **Evaluations need an open board.** Recommendation: accept this for now; add the "path to a UCI engine" setting later if the coach needs it with no board open.
 4. **The 2D glyph licence.** Recommendation: confirm the grant in step 4. If it is CC BY-SA only, ship the glyph data as a loose file beside the program (not in `art/`, since it is not non-commercial).

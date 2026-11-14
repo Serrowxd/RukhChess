@@ -1,11 +1,4 @@
 //! `/api/ws`: the socket a board page keeps open.
-//!
-//! The server sends `hello`, then the current state frame, then every later frame (a slow socket
-//! may skip some, but always ends on the latest). The page sends intents and gets one `ack` each.
-//! Presence messages (`{"t":"presence",...}`) are sent after the first frame and whenever presence
-//! changes; they are not state and carry no rev.
-//! One loop per socket does all the writing, and it sends a frame at least as new as an ack before
-//! the ack itself, so when the page sees an ack its board already shows the result.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -19,24 +12,24 @@ use serde_json::{json, Value};
 use crate::http::{AppState, PROTO};
 use crate::hub::{Frame, Hub};
 
-/// Largest message a page may send. Intents are small. A bigger message that is still under
-/// [`HARD_LIMIT_BYTES`] is read whole and refused with an ack, so the page can say why.
+/// Larger messages under [`HARD_LIMIT_BYTES`] are refused with an ack.
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
-/// Largest message the socket reads at all. Above this the socket is closed with code 1009.
+/// Above this the socket is closed with code 1009.
 const HARD_LIMIT_BYTES: usize = 1024 * 1024;
 
-/// How long one send may wait on a page that stopped reading before the socket is dropped.
+/// A page that stops reading for this long is dropped.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn upgrade(State(state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
     let k = state.next_view.fetch_add(1, Ordering::Relaxed) + 1;
+
     ws.max_message_size(HARD_LIMIT_BYTES)
         .max_frame_size(HARD_LIMIT_BYTES)
         .on_upgrade(move |socket| run(socket, state, format!("view:{k}")))
 }
 
-/// The answer to one message: the ack text, and the rev the page must have seen before it.
+/// `rev` is the frame the page must have seen before the ack.
 pub struct Ack {
     pub json: String,
     pub rev: Option<u64>,
@@ -53,10 +46,7 @@ fn refused(id: &Value, code: &str, message: String) -> Ack {
     }
 }
 
-/// Applies one message from a page. Returns None for messages that need no answer.
-///
-/// An intent is the whole message, `{"t":"intent","id":n,"op":...}`: the table reads `op` and
-/// its fields and ignores `t` and `id`.
+/// None for messages that need no answer.
 pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
     if text.len() > MAX_MESSAGE_BYTES {
         let id = serde_json::from_str::<Value>(text)
@@ -72,6 +62,7 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
             ),
         ));
     }
+
     let value: Value = match serde_json::from_str(text) {
         Ok(value) => value,
         Err(e) => {
@@ -82,11 +73,12 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
             ))
         }
     };
+
     if value.get("t").and_then(Value::as_str) != Some("intent") {
-        // Other message types belong to later versions of the page; ignoring them keeps an older
-        // program working with a newer page.
+        // Keeps an older program working with a newer page.
         return None;
     }
+
     let id = value.get("id").cloned().unwrap_or(Value::Null);
     Some(match hub.apply(who, text, id.as_u64()) {
         Ok(applied) => Ack {
@@ -100,8 +92,7 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
     })
 }
 
-/// Sends one message. False when the socket failed or the page did not take the message within
-/// [`SEND_TIMEOUT`]; either way the socket is finished.
+/// False means the socket is finished.
 async fn send_message(socket: &mut WebSocket, message: Message) -> bool {
     matches!(
         tokio::time::timeout(SEND_TIMEOUT, socket.send(message)).await,
@@ -114,7 +105,7 @@ async fn send_frame(socket: &mut WebSocket, frame: &Frame, sent_rev: &mut u64) -
     send_message(socket, Message::Text(frame.json.clone().into())).await
 }
 
-/// True when a receive error is a message over [`HARD_LIMIT_BYTES`].
+/// A message over [`HARD_LIMIT_BYTES`].
 fn is_too_large(error: &axum::Error) -> bool {
     use std::error::Error as _;
     matches!(
@@ -125,7 +116,6 @@ fn is_too_large(error: &axum::Error) -> bool {
     )
 }
 
-/// The close frame for a page that sent a message over the size limit, so it can say why.
 fn too_large_close() -> Message {
     Message::Close(Some(CloseFrame {
         code: close_code::SIZE,
@@ -138,19 +128,23 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
     let mut frames = state.hub.subscribe();
     let mut presence = state.hub.presence().subscribe();
     let mut shutdown = state.shutdown.clone();
+
     let hello = json!({"t": "hello", "proto": PROTO, "instance": state.hub.instance(), "you": who});
     if !send_message(&mut socket, Message::Text(hello.to_string().into())).await {
         return;
     }
+
     let mut sent_rev = 0;
     let first = frames.borrow_and_update().clone();
     if !send_frame(&mut socket, &first, &mut sent_rev).await {
         return;
     }
+
     let now = presence.borrow_and_update().clone();
     if !send_message(&mut socket, Message::Text(now.as_str().into())).await {
         return;
     }
+
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -158,6 +152,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
                 if changed.is_err() {
                     break;
                 }
+
                 let now = presence.borrow_and_update().clone();
                 if !send_message(&mut socket, Message::Text(now.as_str().into())).await {
                     break;
@@ -167,6 +162,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
                 if changed.is_err() {
                     break;
                 }
+
                 let frame = frames.borrow_and_update().clone();
                 if frame.rev > sent_rev && !send_frame(&mut socket, &frame, &mut sent_rev).await {
                     break;
@@ -182,22 +178,25 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                     Some(Ok(_)) => continue,
                 };
+
                 let Some(ack) = handle_text(&state.hub, &who, text.as_str()) else {
                     continue;
                 };
-                // The hub published the frame for this change before answering, so the latest
-                // frame is at least as new as the ack.
+
+                // The hub published this change's frame before answering.
                 if ack.rev.is_some_and(|rev| rev > sent_rev) {
                     let frame = frames.borrow_and_update().clone();
                     if !send_frame(&mut socket, &frame, &mut sent_rev).await {
                         break;
                     }
                 }
+
                 if !send_message(&mut socket, Message::Text(ack.json.into())).await {
                     break;
                 }
             }
         }
     }
+
     send_message(&mut socket, Message::Close(None)).await;
 }

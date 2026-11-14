@@ -1,9 +1,4 @@
-//! MCP over streamable HTTP at `/mcp`: the tools `get_game`, `wait`, `play` and `annotate`, the
-//! prompts `play` and `review`, and the server instructions.
-//!
-//! Each client acts on the table as `ai:<client name>`, the name it gave in `initialize`. Results
-//! are structured content plus one short line of prose; refusals a model should read are tool
-//! errors with readable text.
+//! MCP over streamable HTTP at `/mcp`: tools, prompts and server instructions.
 
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -32,40 +27,33 @@ use crate::presence::clean_name;
 
 pub type Service = StreamableHttpService<RukhMcp, LocalSessionManager>;
 
-/// Default and bounds of `wait`'s `timeout_s`. The session keep-alive (300 s) stays above them.
+/// Default and bounds of wait's timeout_s, kept under the 300 s session keep-alive.
 const WAIT_DEFAULT_S: u64 = 45;
 const WAIT_MIN_S: u64 = 1;
 const WAIT_MAX_S: u64 = 240;
 
-/// How often a long `wait` reports progress to a client that asked for it.
 const PROGRESS_EVERY: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
     Duration::from_secs(10)
 };
 
-/// Longest a progress notification may take to send. A client that stopped reading must not hold
-/// a wait past its deadline or past a cancellation.
+/// A client that stopped reading must not hold a wait past its deadline.
 const PROGRESS_SEND_LIMIT: Duration = Duration::from_secs(2);
 
-/// The newest protocol version served. Later versions serve each request on a fresh handler with
-/// no session, which would lose who a client is between calls; until that is built and tested,
-/// such clients are asked to fall back to a version with `initialize`.
+/// Later versions have no session, so who a client is would be lost; see docs/program.md.
 const MAX_PROTOCOL: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
-/// One MCP session. The HTTP service makes one per session, so what is kept here belongs to that
-/// client alone.
+/// One per MCP session, so what is kept here belongs to that client alone.
 #[derive(Clone)]
 pub struct RukhMcp {
     hub: Arc<Hub>,
-    /// The board's address, for the no-board-open note.
+    /// For the no-board-open note.
     link: Arc<str>,
     session: u64,
-    /// `(by, name)` of this client, fixed at its first request.
+    /// `(by, name)`, fixed at the first request.
     me: Arc<OnceLock<(String, String)>>,
-    /// `(game_id, node)` of the last position this client was given by `get_game` or `wait`;
-    /// used as `from_node` when its next `play` gives none, so a move chosen for that position is
-    /// never played elsewhere. Cleared by any play, played or refused.
+    /// `(game_id, node)` last shown; stands in for a missing `from_node`. Cleared by any play.
     turn_seen: Arc<Mutex<Option<(u64, u32)>>>,
     /// The seat of this client's last `wait(for: my_turn)`.
     last_side: Arc<Mutex<Option<Side>>>,
@@ -116,9 +104,7 @@ pub enum ModeArg {
     Clear,
 }
 
-// ArrowArg and HighlightArg only describe the input in the published schema. The items arrive as
-// raw JSON, so the table can check them one at a time and report a bad one instead of refusing
-// the whole call. Their doc comments are shown to models.
+// Schema only: the items arrive as raw JSON so the table can refuse a bad one alone.
 
 /// An arrow from one square to another.
 #[allow(dead_code)]
@@ -233,7 +219,6 @@ pub struct ReviewPromptArgs {
     pub level: Option<String>,
 }
 
-/// The server instructions: the loop, who owns the style, and the three style rules word for word.
 pub fn instructions() -> String {
     format!(
         "Rukh is a shared 3D chessboard: a person plays on it in the browser, and you join the same \
@@ -251,41 +236,42 @@ fn tool_error(text: impl Into<String>) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text.into())])
 }
 
-/// A result a model can read whichever half its client passes on: the content holds the prose
-/// line and then the full JSON; the structured value carries the prose as `message`.
+/// Readable whichever half the client passes on: content and structured value both carry the line.
 fn tool_ok(mut value: Value, line: String) -> CallToolResult {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("message".into(), json!(line));
     }
+
     let mut result = CallToolResult::structured(value.clone());
     result.content = vec![
         ContentBlock::text(line),
         ContentBlock::text(value.to_string()),
     ];
+
     result
 }
 
-/// The timeout result: exactly `{event, board_rev}` as structured content, the prose line first
-/// in the content.
+/// Structured content is exactly `{event, board_rev}`.
 fn tool_timeout(board_rev: u64, line: String) -> CallToolResult {
     let value = serde_json::to_value(WaitEvent::timeout(board_rev))
         .unwrap_or_else(|_| json!({"event": "timeout", "board_rev": board_rev}));
+
     let mut result = CallToolResult::structured(value.clone());
     result.content = vec![
         ContentBlock::text(line),
         ContentBlock::text(value.to_string()),
     ];
+
     result
 }
 
-/// Plain JSON Schema for a tool's input: no `$schema`, no `$defs`/`$ref`, no null alternatives,
-/// no integer formats, string enums inlined. Some clients accept only this subset; serde still
-/// treats a missing optional field as absent.
+/// The JSON Schema subset some clients need; see docs/program.md.
 fn plain_schema(schema: &Value) -> Value {
     fn walk(v: &Value, defs: &Map<String, Value>) -> Value {
         let Some(obj) = v.as_object() else {
             return v.clone();
         };
+
         // A reference: inline the definition, keeping the field's own description.
         if let Some(target) = obj
             .get("$ref")
@@ -297,14 +283,17 @@ fn plain_schema(schema: &Value) -> Value {
             if let (Some(out), Some(desc)) = (inlined.as_object_mut(), obj.get("description")) {
                 out.insert("description".into(), desc.clone());
             }
+
             return inlined;
         }
+
         // `anyOf: [X, {type: null}]` (an optional field): just X.
         if let Some(any) = obj.get("anyOf").and_then(Value::as_array) {
             let rest: Vec<&Value> = any
                 .iter()
                 .filter(|s| s.get("type").and_then(Value::as_str) != Some("null"))
                 .collect();
+
             if rest.len() == 1 {
                 let mut inner = walk(rest[0], defs);
                 if let Some(out) = inner.as_object_mut() {
@@ -314,15 +303,18 @@ fn plain_schema(schema: &Value) -> Value {
                         }
                     }
                 }
+
                 return inner;
             }
         }
+
         // A string enum written as `oneOf` of constants: a plain `enum`.
         if let Some(one) = obj.get("oneOf").and_then(Value::as_array) {
             let values: Option<Vec<Value>> = one
                 .iter()
                 .map(|s| s.get("const").or_else(|| s.get("enum")?.get(0)).cloned())
                 .collect();
+
             if let Some(values) = values {
                 let mut out = Map::new();
                 out.insert("type".into(), json!("string"));
@@ -330,9 +322,11 @@ fn plain_schema(schema: &Value) -> Value {
                 if let Some(desc) = obj.get("description") {
                     out.insert("description".into(), desc.clone());
                 }
+
                 return Value::Object(out);
             }
         }
+
         let mut out = Map::new();
         for (k, val) in obj {
             match k.as_str() {
@@ -349,6 +343,7 @@ fn plain_schema(schema: &Value) -> Value {
                                 .iter()
                                 .filter(|t| t.as_str() != Some("null"))
                                 .collect();
+
                             if kept.len() == 1 {
                                 kept[0].clone()
                             } else {
@@ -378,6 +373,7 @@ fn plain_schema(schema: &Value) -> Value {
                 }
             }
         }
+
         // A field that could be null is optional, never required.
         if let (Some(required), Some(props)) = (
             obj.get("required").and_then(Value::as_array),
@@ -392,8 +388,10 @@ fn plain_schema(schema: &Value) -> Value {
                     .get("anyOf")
                     .and_then(Value::as_array)
                     .is_some_and(|a| a.iter().any(|x| x.get("type") == Some(&json!("null"))));
+
                 in_type || in_any
             };
+
             let kept: Vec<Value> = required
                 .iter()
                 .filter(|name| {
@@ -403,36 +401,44 @@ fn plain_schema(schema: &Value) -> Value {
                 })
                 .cloned()
                 .collect();
+
             out.insert("required".into(), Value::Array(kept));
         }
+
         Value::Object(out)
     }
+
     let defs = schema
         .get("$defs")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+
     walk(schema, &defs)
 }
 
-/// The tool router with every input schema made plain (see [`plain_schema`]), built once.
+/// Built once, with every input schema made plain.
 fn plain_tool_router() -> &'static ToolRouter<RukhMcp> {
     static ROUTER: OnceLock<ToolRouter<RukhMcp>> = OnceLock::new();
+
     ROUTER.get_or_init(|| {
         let mut router = RukhMcp::tool_router();
+
         for route in router.map.values_mut() {
             let schema = Value::Object((*route.attr.input_schema).clone());
             if let Value::Object(plain) = plain_schema(&schema) {
                 route.attr.input_schema = Arc::new(plain);
             }
         }
+
         router
     })
 }
 
-/// What the newest change in a `changed` event was, as a sentence start.
+/// The newest change in a `changed` event, as a sentence.
 fn change_sentence(change: &Value) -> String {
     let by = change["by"].as_str().unwrap_or("");
+
     let who = if by.starts_with("view:") {
         "The person".to_string()
     } else if let Some(name) = by.strip_prefix("ai:") {
@@ -441,6 +447,7 @@ fn change_sentence(change: &Value) -> String {
     } else {
         "Rukh".to_string()
     };
+
     let node = &change["node"];
     match change["reason"].as_str() {
         Some("move") => format!(
@@ -461,31 +468,37 @@ fn rejected_note(result: &Value) -> String {
     let Some(rejected) = result.get("rejected").and_then(Value::as_array) else {
         return String::new();
     };
+
     if rejected.is_empty() {
         return String::new();
     }
+
     let reasons: Vec<&str> = rejected
         .iter()
         .filter_map(|r| r.get("reason").and_then(Value::as_str))
         .collect();
+
     let count = if rejected.len() == 1 {
         "1 item was".to_string()
     } else {
         format!("{} items were", rejected.len())
     };
+
     format!(" {count} not applied: {}.", reasons.join("; "))
 }
 
 fn str_at<'a>(value: &'a Value, path: &[&str]) -> &'a str {
     let mut v = value;
+
     for key in path {
         v = &v[*key];
     }
+
     v.as_str().unwrap_or("")
 }
 
 impl RukhMcp {
-    /// `(by, name)` of this session's client, fixed at its first request and listed in presence.
+    /// Fixed at the first request and listed in presence.
     fn who(&self, client: Option<Implementation>) -> (String, String) {
         self.me
             .get_or_init(|| {
@@ -517,6 +530,7 @@ impl RukhMcp {
             .turn_seen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         *slot = seen;
     }
 
@@ -527,8 +541,7 @@ impl RukhMcp {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Remembers the node a move read from this position body would be played from: the tip
-    /// during a match, the shown node otherwise.
+    /// The tip during a match, the shown node otherwise.
     fn position_seen(&self, game_id: u64, body: &Value) {
         let node = body["tip"].as_u64().or_else(|| body["node"].as_u64());
         let seen = node.and_then(|n| u32::try_from(n).ok());
@@ -548,40 +561,42 @@ impl RukhMcp {
             .last_side
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let moved_to = self.hub.read(|t| t.seat_moved_to());
         last.filter(|side| moved_to == Some(side.other()))
     }
 
-    /// The seat this client holds in the running match, if any.
     fn held_seat(&self, by: &str) -> Option<Side> {
         let remembered = self.hub.presence().seat_of(by);
+
         self.hub.read(|t| {
             let m = t.match_state();
             remembered.filter(|side| m.active && m.seats.get(*side) == Seat::Ai)
         })
     }
 
-    /// The seat `wait(for: my_turn)` waits on when no seat was passed: the one this client took
-    /// before, or the only AI seat of the running match when no other client holds it.
+    /// With no seat passed: the one held before, or the only AI seat if nobody else holds it.
     fn implied_seat(&self, by: &str) -> Option<Side> {
         self.held_seat(by).or_else(|| {
             let only = self.hub.read(|t| {
                 let m = t.match_state();
+
                 if !m.active {
                     return None;
                 }
+
                 match (m.seats.white == Seat::Ai, m.seats.black == Seat::Ai) {
                     (true, false) => Some(Side::White),
                     (false, true) => Some(Side::Black),
                     _ => None,
                 }
             })?;
+
             let other = self.hub.presence().holder_of(only);
             other.is_none_or(|(holder, _)| holder == by).then_some(only)
         })
     }
 
-    /// The tool result for a wait that ended with `event`.
     fn wait_result(
         &self,
         event: &WaitEvent,
@@ -594,18 +609,22 @@ impl RukhMcp {
             Ok(value) => value,
             Err(e) => return tool_error(format!("The game could not be encoded: {e}")),
         };
+
         if event.position.is_some() {
             self.position_seen(game_id, &value);
         }
+
         if let (Some(seat), Some((by, name))) = (event.seat, self.me.get()) {
             self.hub.presence().set_seat(by, name, seat);
             self.set_last_side(Some(seat));
         }
+
         let line = format!(
             "{prefix}{}{}",
             wait_line(&value, side),
             self.views_note(views)
         );
+
         tool_ok(value, line)
     }
 
@@ -615,11 +634,12 @@ impl RukhMcp {
             .map(|applied| applied.result)
     }
 
-    /// Takes `seat` for this client. Returns the prose to put before the wait result.
+    /// Returns the prose to put before the wait result.
     fn claim(&self, by: &str, seat: Side) -> Result<String, rukh_core::Error> {
         let result = self.apply(by, json!({"op": "claim_seat", "seat": seat.name()}))?;
         let started = result["started"].as_bool().unwrap_or(false);
         let claimed = result["claimed"].as_bool().unwrap_or(false);
+
         Ok(if started {
             format!(
                 "You play {}; a match has started from the current position, and the person plays {}. ",
@@ -634,13 +654,13 @@ impl RukhMcp {
     }
 }
 
-/// The prose line for a wait result.
 fn wait_line(event: &Value, side: Option<Side>) -> String {
     let style = str_at(event, &["style", "name"]);
     let wait_again = match side {
         Some(side) => format!("call wait with seat=\"{}\" again", side.name()),
         None => "call wait again".to_string(),
     };
+
     match event["event"].as_str() {
         Some("your_turn") => {
             let seat = side.map(Side::title).unwrap_or("your side");
@@ -648,6 +668,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
                 Some(san) => format!(" The last move was {san}."),
                 None => String::new(),
             };
+
             format!(
                 "Your turn: you play {seat}.{last} Choose from legal_moves, call play with \
                  from_node={}, and follow style.rule ({style}).",
@@ -657,6 +678,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
         Some("seat_changed") => {
             let seat = event["seat"].as_str().unwrap_or("");
             let title = if seat == "white" { "White" } else { "Black" };
+
             format!(
                 "Your seat changed: the person moved you to {title} in this match. Keep playing: \
                  call wait with seat=\"{seat}\"."
@@ -667,6 +689,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
                 "Stop and tell them; nothing more happens until they press Start on the board.";
             let again =
                 format!("If the person starts a new game or asks for another, {wait_again}.");
+
             match event["stopped"].as_str() {
                 Some("match_stop") => format!("The person stopped the match. {wait_for_start}"),
                 Some("new_game") => format!(
@@ -689,6 +712,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
                             str_at(event, &["status", "reason"]),
                         )
                     };
+
                     if outcome.is_empty() {
                         format!("The match has ended. {again}")
                     } else {
@@ -703,6 +727,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
         Some("changed") => {
             let listed = event["since_last"].as_array();
             let n = listed.map_or(0, Vec::len);
+
             let newest = match listed.and_then(|l| l.last()) {
                 Some(change) => format!("{} ", change_sentence(change)),
                 None => "The board changed, but the changes are no longer listed. ".to_string(),
@@ -718,6 +743,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
             } else {
                 ""
             };
+
             format!(
                 "{newest}{changes} in since_last; the board is now at board_rev {}. Style: \
                  {style}.{older}",
@@ -732,6 +758,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
 impl RukhMcp {
     pub fn new(hub: Arc<Hub>, link: &str) -> RukhMcp {
         let session = hub.next_session();
+
         RukhMcp {
             hub,
             link: Arc::from(link),
@@ -753,9 +780,11 @@ impl RukhMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let (by, name) = self.who(context.client_info());
         self.hub.presence().seen(&by, &name);
+
         let seat = self.held_seat(&by);
         let views = self.hub.presence().views();
         let tree = args.detail == Some(DetailArg::Tree);
+
         let (value, game_id) = self.hub.read(|t| {
             let value = if tree {
                 serde_json::to_value(t.tree(seat, views))
@@ -764,11 +793,14 @@ impl RukhMcp {
             };
             (value, t.game_id())
         });
+
         let value = match value {
             Ok(value) => value,
             Err(e) => return Ok(tool_error(format!("The game could not be encoded: {e}"))),
         };
+
         self.position_seen(game_id, &value);
+
         let browsing = if value["tip"].is_u64() && value["live"] == false {
             format!(
                 " The person is browsing node {}; the match continues from node {}, where a move \
@@ -778,6 +810,7 @@ impl RukhMcp {
         } else {
             String::new()
         };
+
         let line = format!(
             "{} Node {}, board_rev {}. Style: {}.{browsing}{}",
             str_at(&value, &["status", "text"]),
@@ -786,6 +819,7 @@ impl RukhMcp {
             str_at(&value, &["style", "name"]),
             self.views_note(views)
         );
+
         Ok(tool_ok(value, line))
     }
 
@@ -801,6 +835,7 @@ impl RukhMcp {
         let (by, name) = self.who(context.client_info());
         let presence = self.hub.presence().clone();
         presence.seen(&by, &name);
+
         let timeout_s = args
             .timeout_s
             .unwrap_or(WAIT_DEFAULT_S)
@@ -808,8 +843,7 @@ impl RukhMcp {
 
         let mut prefix = String::new();
         let what = match args.what.unwrap_or(WaitForArg::MyTurn) {
-            // Following the board never takes a seat, even when one is passed: a coach must not
-            // become the person's opponent.
+            // Never takes a seat: a coach must not become the person's opponent.
             WaitForArg::AnyChange => WaitFor::AnyChange { since: args.since },
             WaitForArg::MyTurn => {
                 let side = match args.seat.map(Side::from) {
@@ -838,35 +872,39 @@ impl RukhMcp {
                         }
                     },
                 };
+
                 let seated = self.hub.read(|t| {
                     let m = t.match_state();
                     m.active && m.seats.get(side) == Seat::Ai
                 });
+
                 // Waiting on a seat is holding it.
                 if seated {
                     presence.set_seat(&by, &name, side);
                 }
+
                 self.set_last_side(Some(side));
                 WaitFor::MyTurn(side)
             }
         };
+
         let side = match what {
             WaitFor::MyTurn(side) => Some(side),
             WaitFor::AnyChange { .. } => self.held_seat(&by),
         };
 
-        // Subscribe before the first look, so a change between the look and the wait still wakes
-        // this call. The lock is held only to test the table, never while waiting.
+        // Subscribed before the first look, so a change in between still wakes this call.
         let mut frames = self.hub.subscribe();
         let start_rev = self.hub.read(|t| t.rev());
         let _waiting = presence.wait_started(&by, &name);
+
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
         let progress_token = context.meta.get_progress_token();
         let mut progress =
             tokio::time::interval_at(tokio::time::Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY);
         let mut reported = 0u32;
-        // One look at the table: the event if the wait should end, and the counters from the
-        // same lock.
+
+        // The event if the wait should end, and the counters from the same lock.
         let look = || {
             let views = presence.views();
             let (event, board_rev, game_id) = self.hub.read(|t| {
@@ -878,14 +916,15 @@ impl RukhMcp {
             });
             (event, board_rev, game_id, views)
         };
+
         loop {
             let (event, _, game_id, views) = look();
             if let Some(event) = event {
                 return Ok(self.wait_result(&event, side, game_id, views, &prefix));
             }
+
             tokio::select! {
-                // A frame is looked at before the deadline, so a change that lands as the wait
-                // runs out is still reported.
+                // Frames before the deadline, so a change landing as the wait runs out is reported.
                 biased;
                 changed = frames.changed() => {
                     if changed.is_err() {
@@ -897,17 +936,18 @@ impl RukhMcp {
                     return Ok(tool_error("The wait was cancelled."));
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    // A last look under the lock: report a change that landed just now, and take
-                    // the timeout's board_rev from that same look.
+                    // The timeout's board_rev comes from the same last look.
                     let (event, board_rev, game_id, views) = look();
                     if let Some(event) = event {
                         return Ok(self.wait_result(&event, side, game_id, views, &prefix));
                     }
+
                     let line = format!(
                         "{prefix}{}{}",
                         wait_line(&json!({}), side),
                         self.views_note(views)
                     );
+
                     return Ok(tool_timeout(board_rev, line));
                 }
                 _ = progress.tick(), if progress_token.is_some() => {
@@ -918,8 +958,8 @@ impl RukhMcp {
                             f64::from(reported),
                         )
                         .with_message("Still waiting; nobody has moved yet.");
-                        // A client that cannot take the notification still gets the result, and
-                        // one that stopped reading cannot hold the wait here.
+
+                        // A client that stopped reading cannot hold the wait here.
                         let _ = tokio::time::timeout(
                             PROGRESS_SEND_LIMIT,
                             context.peer.notify_progress(param),
@@ -951,6 +991,7 @@ impl RukhMcp {
             let owed = (m.active && m.seats.get(side) == Seat::Ai).then_some(side);
             (owed, t.game_id())
         });
+
         if let Some(side) = owed {
             if let Some((holder, shown)) = presence.holder_of(side) {
                 if holder != by {
@@ -970,13 +1011,14 @@ impl RukhMcp {
         let mut intent = Map::new();
         intent.insert("op".into(), json!("play"));
         intent.insert("move".into(), json!(args.mv));
-        // Without a from_node, the node of the last your_turn stands in for it, so the move is
-        // refused as stale rather than played in a position this client never saw.
+
+        // Stale rather than played in a position this client never saw.
         let from_node = args.from_node.or_else(|| {
             self.turn_seen()
                 .filter(|(game, _)| *game == game_id)
                 .map(|(_, node)| node)
         });
+
         if let Some(node) = from_node {
             intent.insert("from_node".into(), json!(node));
         }
@@ -992,12 +1034,15 @@ impl RukhMcp {
         if let Some(highlights) = args.highlights {
             intent.insert("highlights".into(), Value::Array(highlights));
         }
+
         let applied = self.apply(&by, Value::Object(intent));
         self.set_turn_seen(None);
+
         let mut result = match applied {
             Ok(result) => result,
             Err(e) => return Ok(tool_error(e.to_string())),
         };
+
         let views = presence.views();
         result["views"] = json!(views);
 
@@ -1008,10 +1053,12 @@ impl RukhMcp {
         } else {
             Side::White
         };
+
         let holds = self.hub.read(|t| {
             let m = t.match_state();
             m.active && m.seats.get(mover) == Seat::Ai
         });
+
         if holds {
             presence.set_seat(&by, &name, mover);
         }
@@ -1021,6 +1068,7 @@ impl RukhMcp {
             str_at(&result, &["san"]),
             str_at(&result, &["uci"])
         );
+
         match result["status"]["outcome"].as_str() {
             Some(outcome) => line.push_str(&format!(
                 " Game over: {outcome}, {}.",
@@ -1031,8 +1079,10 @@ impl RukhMcp {
                 if turn == "white" { "White" } else { "Black" }
             )),
         }
+
         line.push_str(&rejected_note(&result));
         line.push_str(&self.views_note(views));
+
         Ok(tool_ok(result, line))
     }
 
@@ -1048,6 +1098,7 @@ impl RukhMcp {
         let (by, name) = self.who(context.client_info());
         let presence = self.hub.presence();
         presence.seen(&by, &name);
+
         let mut intent = Map::new();
         intent.insert("op".into(), json!("annotate"));
         if let Some(node) = args.node {
@@ -1065,18 +1116,22 @@ impl RukhMcp {
         if let Some(highlights) = args.highlights {
             intent.insert("highlights".into(), Value::Array(highlights));
         }
+
         let mode = match args.mode.unwrap_or(ModeArg::Add) {
             ModeArg::Add => "add",
             ModeArg::Replace => "replace",
             ModeArg::Clear => "clear",
         };
         intent.insert("mode".into(), json!(mode));
+
         let mut result = match self.apply(&by, Value::Object(intent)) {
             Ok(result) => result,
             Err(e) => return Ok(tool_error(e.to_string())),
         };
+
         let views = presence.views();
         result["views"] = json!(views);
+
         let applied = &result["applied"];
         let mut parts = Vec::new();
         if applied["note"].as_bool() == Some(true) {
@@ -1095,14 +1150,17 @@ impl RukhMcp {
                 Some(n) => parts.push(format!("{n} {many}")),
             }
         }
+
         let what = if parts.is_empty() {
             "nothing changed".to_string()
         } else {
             parts.join(", ")
         };
+
         let mut line = format!("Annotated node {} ({mode}): {what}.", result["node"]);
         line.push_str(&rejected_note(&result));
         line.push_str(&self.views_note(views));
+
         Ok(tool_ok(result, line))
     }
 }
@@ -1121,6 +1179,7 @@ impl RukhMcp {
             Some(s) if s == "white" => "white",
             _ => "black",
         };
+
         vec![PromptMessage::new_text(
             Role::User,
             format!(
@@ -1147,6 +1206,7 @@ impl RukhMcp {
             }
             _ => String::new(),
         };
+
         vec![PromptMessage::new_text(
             Role::User,
             format!(
@@ -1189,13 +1249,15 @@ impl ServerHandler for RukhMcp {
             .peer
             .peer_info()
             .map(|info| info.client_info.clone());
+
         let (by, name) = self.who(client);
         self.hub.presence().seen(&by, &name);
+
         std::future::ready(())
     }
 }
 
-/// The MCP service for the router, and a function that ends its open sessions at shutdown.
+/// The service, and a function that ends its open sessions at shutdown.
 pub fn service(hub: Arc<Hub>, port: u16) -> (Service, impl Fn() + Send + Sync + 'static) {
     let config = StreamableHttpServerConfig::default()
         .with_allowed_hosts([format!("127.0.0.1:{port}"), format!("localhost:{port}")])
@@ -1203,6 +1265,7 @@ pub fn service(hub: Arc<Hub>, port: u16) -> (Service, impl Fn() + Send + Sync + 
             format!("http://127.0.0.1:{port}"),
             format!("http://localhost:{port}"),
         ]);
+
     let token = config.cancellation_token.clone();
     let link = format!("http://127.0.0.1:{port}/");
     let service = StreamableHttpService::new(
@@ -1210,5 +1273,6 @@ pub fn service(hub: Arc<Hub>, port: u16) -> (Service, impl Fn() + Send + Sync + 
         Arc::new(LocalSessionManager::default()),
         config,
     );
+
     (service, move || token.cancel())
 }

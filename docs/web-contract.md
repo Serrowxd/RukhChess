@@ -1,18 +1,19 @@
-# Chessboard — module contract (v0, 2026-09-17)
+# Web board — module contract (v0, 2026-09-17)
 
-Standalone 3D chessboard. **No backend, ever.** Ships two ways from one build:
-`dist/` (index.html + app.js + app.css + vendor/) for hosting, and `../chessboard.html`
-(everything inlined, Stockfish WASM as base64) that opens by double-click from `file://`.
+The module boundaries and shared shapes of `web/src`. The page needs no server of its own. When the `rukh`
+program serves it, it follows the program's game ([program.md](program.md), [web.md](web.md)).
+`node build.mjs` writes `dist/` (index.html + app.js + app.css + vendor/ + sets/) for hosting and, unless
+`--no-single` is passed, `../chessboard.html`: one file with Stockfish, the Draco decoder and the modelled
+sets inlined as base64, which opens by double-click from `file://`. Proxy sets ship only in `dist/sets/`.
 
 Stack: Three.js 0.186 (ESM, bundled by esbuild) · chessops 0.15 (rules, FEN, SAN, PGN trees,
 Chess960) · js-yaml 5 · Stockfish 19 lite single-thread WASM (`vendor/`) · vanilla JS, no framework.
 
 Everything is plain JavaScript (ESM). No TypeScript. JSDoc where a signature matters.
-Every module owns its files and touches nothing else. Cross-module calls go through the
-APIs in this file. If you need something that is not here, add it to your own module's
-exported surface, document it in your file header, and mention it in your final report.
+Each module owns its files. Cross-module calls go through the APIs in this file. A module that needs
+something not listed here adds it to its own exported surface and documents it in its file header.
 
-## Coordinates and vocabulary (everyone)
+## Coordinates and vocabulary
 
 - Squares are strings `'a1'..'h8'` at every module boundary. chessops square numbers never leave `core/`.
 - Moves at the boundary: `{ from:'e2', to:'e4', promotion?: 'q'|'r'|'b'|'n' }`. UCI strings (`'e2e4'`, `'e7e8q'`)
@@ -55,7 +56,7 @@ exported surface, document it in your file header, and mention it in your final 
 }
 ```
 
-## `core/game.js` — rules + variation tree (pure: no DOM, no three) — OWNER: core agent
+## `core/game.js` — rules + variation tree (pure: no DOM, no three)
 
 ```js
 export class Game {
@@ -119,7 +120,7 @@ export class Game {
 
 `core/chess960.js`: `export function chess960Fen(n): string` (Scharnagl numbering; emit X-FEN castling `KQkq` and **verify castling works in chessops after loading** — if not, emit Shredder-FEN file-letter rights) and `export function randomChess960(): number`.
 
-## `core/io.js` — OWNER: core agent
+## `core/io.js`
 
 ```js
 export const STUDY_VERSION = 1
@@ -160,7 +161,7 @@ moves:                   # main line from the root; ONE entry per half-move
 Omit empty keys (`note: ""`, `arrows: []`, `eval: null`, `variations: []`) on export. Import tolerates missing keys.
 The root node's note/arrows/highlights go under a top-level `start:` key with the same shape (omit when empty).
 
-## `core/store.js` — state + events + actions — OWNER: core agent
+## `core/store.js` — state + events + actions
 
 ```js
 export const store = createStore()             // singleton; also export createStore for tests
@@ -242,14 +243,14 @@ events (payload) — emitted by actions after state is updated:
   'toast'            { text, kind:'info'|'error'|'ok' }
 ```
 
-**Order within one change (fixed 2026-09-18, integrators rely on it):** `game:change` → `engine:update` →
+**Order within one change (fixed 2026-09-18; `main.js` relies on it):** `game:change` → `engine:update` →
 `position:change` → `selection:change`. The selection is cleared *after* the game change so a completed promotion
 is never mistaken for a cancelled one (a genuine cancel is a `selection:change` with no preceding `game:change`).
 
 Rules: actions mutate state then emit. Listeners never mutate state. `store.state.game` is the live Game
 instance (not cloned) — read it, don't call its mutators outside actions.
 
-## `three/scene.js` — renderer / camera / controls — OWNER: three-scene agent
+## `three/scene.js` — renderer / camera / controls
 
 ```js
 export function createView(container: HTMLElement, settings) → view
@@ -278,7 +279,7 @@ far army read: a seat fill (a DirectionalLight from behind the camera, 15 deg up
 back light (a capped silhouette edge in the piece shaders, off on flat faces). Both scale per environment and are off in
 2D and unlit.
 
-## `three/materials.js` — themes — OWNER: three-pieces agent
+## `three/materials.js` — themes
 
 ```js
 export const THEMES = ['wood', 'metal', 'glass']
@@ -291,7 +292,7 @@ Metal: MeshStandardMaterial metalness ≈ 1, roughness ≈ 0.25–0.4, relies on
 Glass: MeshPhysicalMaterial transmission 1, thickness, ior 1.5, slight tint; the board squares stay opaque-ish frosted so pieces read.
 `setPalette` recolours in place (no material re-creation) so the settings sliders are live.
 
-## `three/pieces.js` + `three/pieceLayer.js` — OWNER: three-pieces agent
+## `three/pieces.js` + `three/pieceLayer.js`
 
 ```js
 export const BUILTIN_SETS = [ {id:'staunton', name:'Staunton'}, {id:'minimal', name:'Minimal'}, {id:'glyph', name:'Flat glyph'} ]
@@ -299,7 +300,7 @@ export function listSets() → [{id, name, kind:'builtin'|'gltf'}]
 export function createPiece(role, color, setId, matSet) → THREE.Object3D
      // origin at base centre on y=0, footprint ≤ 0.8 units, heights: pawn .55 knight .75 bishop .8 rook .7 queen .95 king 1.05 (approx, set may vary)
      // userData = { role, color, square:null }; knights face +Z for white and −Z for black (toward the opponent) — pieceLayer rotates by colour.
-     // 'glyph' = flat upright card with the cburnett SVG glyph as a texture (inline SVG → CanvasTexture); always faces the camera (billboard) or lies flat — your call, document it.
+     // 'glyph' = flat upright card with the cburnett SVG glyph as a texture (inline SVG → CanvasTexture); always faces the camera (billboard) or lies flat; the implementation picks one and documents it.
 export async function registerGltfSet({ id, name, url?: string, file?: File, mapping: { pawn:'NodeName', …, king }, scale?: number, keepMaterials?: boolean }) → set descriptor
      // loads with GLTFLoader, clones the named nodes per role; colour by tinting the whitePiece/blackPiece material unless keepMaterials.
 export function applyMaterials(pieceObj, matSet)                  // swap materials on theme change
@@ -316,7 +317,7 @@ layer.pieceObjects() → Object3D[]                                  // raycast 
 layer.dispose()
 ```
 
-## `three/board.js` — board + overlays (highlights, arrows, labels) — OWNER: three-scene agent
+## `three/board.js` — board + overlays (highlights, arrows, labels)
 
 ```js
 export function createBoard(scene, matSet, settings) → board
@@ -338,7 +339,7 @@ board.dispose()
 Overlays sit just above the board (y ≈ 0.005–0.02) with `depthWrite=false` and a render order so they never z-fight.
 Arrows are meshes (shaft + head) built from a 2-D path on the board plane: straight for normal moves, L for knight jumps.
 
-## `three/interact.js` — pointer → actions — OWNER: interaction agent
+## `three/interact.js` — pointer → actions
 
 ```js
 export function createInteraction({ view, board, layer, store, actions }) → { dispose() }
@@ -357,7 +358,7 @@ Behaviour (Play mode):
 - Promotion: `attemptMove` returns 'promotion' → the UI (not this module) shows the picker.
 Interaction reads `store.state.mode`, `selected`, `legalTargets`, `settings.showLegalMoves` and listens to `selection:change` to drive `board.setSelected/ setLegalTargets`.
 
-## `engine/stockfish.js` — OWNER: engine agent
+## `engine/stockfish.js`
 
 ```js
 export function createEngine(store, actions) → engine
@@ -376,20 +377,20 @@ Worker loading — two modes, decided at runtime:
    `'#inline.wasm,worker'`; the `,worker` token marks an Emscripten pthread helper and makes the single-threaded glue load nothing.) The preamble shims `self.fetch` so
    that a request for a URL containing `inline.wasm` returns `fetch('data:application/wasm;base64,' + B64)`; every other URL
    falls through to the original fetch. (The glue reads the wasm URL from `location.hash` and fetches it; `instantiateStreaming` is fine with a data-URL Response.)
-   Read the glue (`vendor/stockfish-19-lite-single.js`, minified, ~21 KB): worker mode is auto-detected inside a dedicated worker; UCI text goes in with `worker.postMessage('uci')` and comes back as string messages.
+   About the glue (`vendor/stockfish-19-lite-single.js`, minified, ~21 KB): worker mode is auto-detected inside a dedicated worker; UCI text goes in with `worker.postMessage('uci')` and comes back as string messages.
 Protocol: `uci` → wait `uciok`; `setoption name UCI_Chess960 value true` when the game is 960; `setoption name MultiPV`; `position fen … ` (or `startpos moves …`);
 `go depth N` / `go movetime M` / `go infinite`; parse `info depth … multipv k score cp|mate … pv …`, `bestmove`. Always `stop` and wait for `bestmove`
 before sending a new position (or use `isready`/`readyok`). Score is reported from the side to move — convert to White's view for the store.
 Eval bar / lines / best-move arrow are driven by `actions.engineLines`. Debounce re-analysis on `position:change` (~150 ms).
 
-## `ai/` — packet, window.chess API, providers, chat — OWNER: ai agent
+## `ai/` — packet, window.chess API, providers, chat
 
 `ai/packet.js`:
 ```js
 export function buildPacket(state, opts = { includeEngine:true, includeLegalMoves:false }) → string   // the text an AI reads
 export function buildContext(state) → object   // same content as JSON (for providers' structured use and window.chess.getState())
 ```
-Packet (plain text, stable headings; this is what a person pastes and what Claude Code reads):
+Packet (plain text, stable headings; this is what a person pastes into a chat and what an AI reads):
 ```
 == Chessboard ==
 variant: standard            (or chess960 #518)
@@ -409,7 +410,7 @@ engine: depth 20  eval +0.35 (White)  best Nf3
   1) +0.35  Nf3 Nc6 Bb5 …
   2) +0.20  …
 ```
-`ai/api.js` — `window.chess` (installed by main.js; this is how Claude Code drives the board through the browser pane):
+`ai/api.js` — `window.chess` (installed by main.js; an AI with a browser tool, or a person at the devtools console, drives the board through it):
 ```js
 window.chess = {
   version, getState() → buildContext, getPacket(opts) → string, getFen(), getPgn(), getYaml(), getLegalMoves() → san[],
@@ -428,12 +429,12 @@ window.chess = {
 `ai/providers.js`:
 - `packet` (default): no network. The AI panel shows the packet with a **Copy** button, and a **Paste reply** box: the reply is shown in the chat log and any fenced ```chess block in it is parsed as JSON `{ arrows, highlights, note, nag, moves }` and applied via `annotate`/`moves`.
 - `local`: OpenAI-compatible `POST {localUrl}/chat/completions` (llama.cpp on 127.0.0.1:8080, no key). Streaming optional.
-- `anthropic`: `POST https://api.anthropic.com/v1/messages` from the browser with headers `x-api-key`, `anthropic-version`, and `anthropic-dangerous-direct-browser-access: true`. Key from localStorage (settings panel field, masked, never exported). **Load the `claude-api` skill before writing this** (model ids, headers, streaming).
+- `anthropic`: `POST https://api.anthropic.com/v1/messages` from the browser with headers `x-api-key`, `anthropic-version`, and `anthropic-dangerous-direct-browser-access: true`. Key from localStorage (settings panel field, masked, never exported).
 System prompt for local/anthropic: explain the packet, ask for concise coaching, and that any drawing/notes must come as ONE fenced ```chess JSON block: `{"arrows":[{"from":"g1","to":"f3","color":"green"}],"highlights":[{"square":"d5","color":"red"}],"note":"…"}`; suggested moves as SAN in `"moves"` are NOT auto-played unless the user clicked "let the AI move".
 Every provider call includes the packet as the user message prefix + the user's question.
 `ai/chat.js`: `createAi(store, actions) → { ask(question) → Promise<void>, applyReply(text), setProvider(id), getKey()/setKey(), dispose() }`.
 
-## `ui/` — panels, move list, settings, dialogs — OWNER: ui agent
+## `ui/` — panels, move list, settings, dialogs
 
 Files: `ui/index.js` (`mountUi({ store, actions, engine?, ai?, view?, pieces? }) → ui` — wires everything below), `ui/layout.js` (shell, tabs, responsive, resize handle),
 `ui/topbar.js`, `ui/moveList.js`, `ui/enginePanel.js`, `ui/aiPanel.js`, `ui/notesPanel.js`, `ui/ioPanel.js`, `ui/settingsPanel.js`,
@@ -453,7 +454,7 @@ Design: quiet, modern sans (IBM Plex Sans / Newsreader via Google Fonts with sys
 (panel becomes a bottom drawer under the canvas). No help prose on the page beyond tooltips; the About tab holds the cheat-sheet.
 The ui talks to engine/ai only through `actions` + store events, plus the objects passed into `mountUi` for direct calls (e.g. `ai.ask`, `engine.start`).
 
-## `main.js` — wiring (owned by the integrator; skeleton exists)
+## `main.js` — wiring
 
 Order: store.restore() or new game → createView → createMaterialSet → createBoard → createPieceLayer → createInteraction →
 mountUi → createEngine → createAi + window.chess → decodeHash → first sync. Subscribes to store events and pushes to board/layer/view.
@@ -463,12 +464,13 @@ mountUi → createEngine → createAi + window.chess → decodeHash → first sy
 
 # Addendum v1 (2026-09-18) — pieces, 2D/3D modes, self-play, clock, MCP
 
-The second brief: (1) the pieces are blocky and hard to read, (2) a **2D mode locked to top-down**
+This addendum records the brief for a change that has since been built: the problems it names are the state before it, and "Addendum v1 — as built" below says what landed.
+
+This addendum covers: (1) the pieces are blocky and hard to read, (2) a **2D mode locked to top-down**
 that switches to 3D **in the same scene**, pieces becoming flat tokens, (3) **self-play** with an
 animated board rotation instead of a hard flip, a **clock**, and an opponent of *self / Stockfish / AI
 over MCP*, (4) **white pieces are hard to see against light squares** — the lighting must be adjustable
-and switchable off. Everything below is binding and overrides the v0 text where they disagree. Same
-ownership rules: edit only your files, never this document.
+and switchable off. It overrides the v0 text where they disagree.
 
 ## New vocabulary
 
@@ -501,7 +503,7 @@ selfPlay: {
 },
 ```
 
-## `core/store.js` — state, actions, events — OWNER: core agent
+## `core/store.js` — state, actions, events
 
 ```js
 state.viewMode : '3d' | '2d'
@@ -538,11 +540,11 @@ Clock rules (`core/clock.js`, pure, unit-tested):
 Self-play rules:
 - `selfPlay.on` with `opponent: 'self'` means: after every played move, if `settings.selfPlay.autoFlip`,
   the orientation changes to the side now to move (`actions.setOrientation`), which the view animates.
-- `opponent: 'engine'` delegates to the existing `engine.setPlayAs(...)` for the side she is not playing.
+- `opponent: 'engine'` delegates to the existing `engine.setPlayAs(...)` for the side the player is not playing.
 - `opponent: 'ai'` sets `selfPlay.awaiting` to the side the AI must move and lets `ai/mcpBridge.js` answer.
 - Self-play never changes the rules: both sides stay movable by hand (no piece locking, per the v0 rule).
 
-## `three/scene.js` — OWNER: view agent
+## `three/scene.js`
 
 ```js
 view.setViewMode(mode, { animate = true })   // '2d' locks the camera to straight overhead and disables orbit;
@@ -557,15 +559,15 @@ view.rotateSeat(orientation, { duration = 700, animate = true }) -> Promise
 2D mode specifics: the camera looks straight down (polar 0) at a distance framing the whole board with the
 frame visible; **orbit is disabled** (`controls.enableRotate = false`), pan and zoom stay on, and the polar/azimuth
 limits are pinned so nothing can tilt it. Use an orthographic projection if the perspective distortion is visible
-at the corners — your call, but the switch must not break `raycast` / `pointerToPlane` (the interaction module
+at the corners, as long as the switch does not break `raycast` / `pointerToPlane` (the interaction module
 depends on both, and `board.squareAtPoint` must keep working). Restore the exact 3D pose on the way back.
 
-## Lighting and contrast — OWNER: view agent (lights), pieces agent (materials)
+## Lighting and contrast
 
-**The problem, in her words: white pieces are hard to see against the white squares.** Confirmed from a
-top-down capture — a white piece on a light square has almost no edge. Fix it from both sides.
+**The problem: white pieces are hard to see against the white squares.** Confirmed from a top-down
+capture — a white piece on a light square has almost no edge. Fix it from both sides.
 
-`three/scene.js` (view agent):
+`three/scene.js` (lights):
 ```js
 view.setLighting(patch)   // { preset?, on?, exposure?, key?, ambient?, shadows? } — applied live, no reload
 view.lighting             // the resolved current values
@@ -576,10 +578,10 @@ view.lighting             // the resolved current values
   shading, so shape reads purely as silhouette and contrast is maximal. Implement it as a material switch
   (`MeshBasicMaterial`-style unlit response) rather than by zeroing the lights, which would just make
   everything black. `scene.environment` must be neutralised in this mode too, or metal and glass go dark.
-  Coordinate the switch with the pieces agent: `materials.js` exposes the unlit variant, `scene.js` asks for it.
+  `materials.js` exposes the unlit variant; `scene.js` asks for it.
 - Every knob is live and persisted through `settings.lighting.*`.
 
-`three/materials.js` (pieces agent):
+`three/materials.js` (materials):
 ```js
 createMaterialSet(theme, palette, { unlit = false })   // additive third argument; existing calls unchanged
 matSet.setUnlit(bool)                                  // live switch, keeps colours and palette
@@ -590,9 +592,9 @@ matSet.setUnlit(bool)                                  // live switch, keeps col
   drawn even when `shadows` is off) is the cheapest reliable answer. It must hold in 2D top-down, in the
   `flat` lighting mode and on all three themes — check a white piece on a light square in each.
 - Also raise the default contrast between the two square colours slightly if that is what is washing the
-  pieces out, but the piece edge is the primary fix: the palette is hers to change and must keep working.
+  pieces out, but the piece edge is the primary fix: the palette is the user's to change and must keep working.
 
-## `three/board.js` — OWNER: view agent
+## `three/board.js`
 
 ```js
 board.setViewMode(mode)   // 2D: flatten the frame, drop the bevel/thickness shading to a clean 2D look,
@@ -601,7 +603,7 @@ board.setViewMode(mode)   // 2D: flatten the frame, drop the bevel/thickness sha
 Overlays (arrows, dots, highlights, the check glow, note cards) must read correctly in both modes; arrows
 especially, since in 2D they are seen head-on.
 
-## `three/pieces.js` — OWNER: pieces agent
+## `three/pieces.js`
 
 The v0 Staunton set reads as blocky from the seat and as featureless blobs from above. Rework it:
 - **More profile points and more lathe segments** so the silhouette is smooth, not stepped. Curves where a
@@ -618,7 +620,7 @@ The v0 Staunton set reads as blocky from the seat and as featureless blobs from 
   for 2D (`glyph` and any other flat set you add).
 - Watch the cost: piece geometry is built per set and cached; do not regress the theme-switch time.
 
-## `three/pieceLayer.js` — OWNER: layer agent
+## `three/pieceLayer.js`
 
 ```js
 layer.setViewMode(mode)   // swap to settings.pieceSet2d in 2D and back to settings.pieceSet in 3D,
@@ -628,17 +630,17 @@ The layer must keep working mid-drag and mid-animation across a mode switch (can
 stranding a lifted piece). Tokens lie flat and must stay upright for the **current orientation**, including
 during a seat rotation.
 
-## `three/interact.js` — OWNER: layer agent
+## `three/interact.js`
 
 In 2D: left-drag on empty board must **not** orbit (the camera is locked); everything else — click-move,
 drag-move, right-drag arrows, right-click highlights, double-click focus — behaves as in 3D. Dragging a piece
 still lifts it slightly so it reads above the board. Re-check the raycast path against whatever projection
 `scene.js` uses in 2D.
 
-## `ui/` — OWNER: ui agent
+## `ui/`
 
 - **View toggle** in the topbar: `2D / 3D`, showing the current mode, keyboard `V`.
-- **Self-play panel** (its own tab or a block in Engine — your call, keep it findable): start/stop, opponent
+- **Self-play panel** (its own tab or a block in Engine, kept findable): start/stop, opponent
   selector (Yourself / Stockfish / AI over MCP), time-control presets (untimed, 1+0, 3+2, 5+0, 10+0, 15+10,
   custom), `rotate` and `autoFlip` switches.
 - **Clock**: two readouts, the side to move highlighted, low time under 30 s in the warning colour, flagged
@@ -651,42 +653,53 @@ still lifts it slightly so it reads above the board. Re-check the raycast path a
   feedback is the point) but must not thrash: coalesce to animation frames if needed.
 - Everything through `actions` + store events, as before.
 
-## `ai/mcpBridge.js` + `mcp/chess_mcp.py` — OWNER: mcp agent
+## `ai/mcpBridge.js` — the optional loopback bridge
 
-The page stays serverless by default. The MCP path is **opt-in** and is the "AI over MCP" opponent.
-Follow the shape of `Ideas/Lattice/prototype/mcp_server.py` (FastMCP over stdio, atomic file writes,
-`--selftest`), with one addition: chess needs the page to *publish* its position, so the server also runs a
-small loopback HTTP bridge.
+The page stays serverless by default. The bridge is **opt-in** and is one way to seat an "AI over MCP"
+opponent: it talks to a separate MCP server on `http://127.0.0.1:8152`. That server is not part of this
+repository and is not shipped; the built-in way for an AI to connect is the `rukh` program's own MCP
+endpoint ([architecture.md](architecture.md), [program.md](program.md)). This section is what the page sends
+and expects, so any server that speaks it can drive the board.
 
-- `mcp/chess_mcp.py`: FastMCP server named `chess`, plus `http://127.0.0.1:8152` with permissive CORS for
-  localhost and `null` (file://) origins. Endpoints: `POST /state` (the page publishes the packet + FEN +
-  legal moves + whose turn), `GET /state`, `GET /commands?since=n` (the page polls), `POST /ack`.
-  MCP tools, thin over that state: `get_position`, `get_packet`, `legal_moves`, `play(san_or_uci)`,
-  `annotate(arrows, highlights, note)`, `set_fen`, `new_game`, `status`. Tools must fail clearly when no page
-  is connected. `--selftest` exercises the queue and the state machine without the `mcp` package installed.
-- `src/ai/mcpBridge.js`: `createMcpBridge(store, actions, { url }) -> { enable(), disable(), status() }`.
-  When enabled it POSTs state on `position:change`, polls commands (~700 ms), applies them through `actions`,
-  and acks. Never throws into the app; a dead server sets a status the UI can show and retries with backoff.
-  Wire `selfPlay.opponent === 'ai'` to it: when `selfPlay.awaiting` names a colour, the bridge asks for a move.
-- Keep it entirely optional: with the bridge disabled nothing polls, nothing is fetched, and the single-file
-  build behaves exactly as it does today.
+`src/ai/mcpBridge.js`: `createMcpBridge(store, actions, { url }) -> { enable(), disable(), dispose(), status(), isEnabled(), publish(), poll(), applyCommand(cmd), url }`.
 
-## Test and check rules (unchanged)
+- `POST /state` — the page publishes on enable, on every `position:change` and `selfplay:change`, after
+  any command that changed something, and every 3 s while a move request is outstanding. Body (JSON):
+  `protocol: 1`, `variant`, `chess960`, `start_fen`, `fen`, `turn`, `move_number`, `ply`, `line`, `history`
+  (SAN), `last_move`, `status`, `legal_moves` (SAN), `arrows`, `highlights`, `note`, `title`, `mode`,
+  `orientation`, `view_mode`, `self_play`, `opponent`, `ai_style`, `awaiting`, `clock` (`{ white, black,
+  running, flagged }` in ms, or `null` when untimed), `packet` (the text packet) and `at` (ISO time).
+  The reply may carry `since`; a value below the page's cursor means the server restarted, and the cursor
+  rewinds to it.
+- `GET /commands?since=n` — polled about every 700 ms. Reply `{ seq, commands: [{ seq, op, args }] }`.
+  Commands with `seq <= since` are skipped; a `seq` below the cursor rewinds it.
+- `POST /ack` — `{ acks: [{ seq, ok, result, error }] }`, one per command applied. A refused move is still
+  acked, with `ok: false` and the reason.
+- Ops the page applies, all through `actions`: `play { move }` (SAN or UCI; leading move numbers and
+  trailing `!`/`?` stripped), `annotate { arrows, highlights, note, nag }`, `set_fen { fen }`, `new_game`,
+  `goto { node_id }`, `back`, `forward`, `ping`, `refresh`. Anything else is refused as unknown.
+- Never throws into the app; a dead server sets a status the UI can show and retries with backoff
+  (700 ms doubling to 10 s). Each request times out after 4 s.
+- Wired to `selfPlay.opponent === 'ai'`: when `selfPlay.awaiting` names a colour, the published
+  `awaiting` field is the request for a move.
+- Keep it entirely optional: with the bridge disabled nothing polls, nothing is fetched, and the page
+  behaves exactly as it does without it.
 
-`node --test` must pass for everything you touch. Do not run `npm run build` while others are working.
-Do not open the browser pane. Windows: ASCII console output in node scripts.
+## Test and check rules
 
-## Addendum v1 — as built (2026-09-18, after integration)
+`node --test` must pass for every changed module. Windows: ASCII console output in node scripts.
 
-Deviations and additions the builders landed, recorded so the document keeps matching the code:
+## Addendum v1 — as built (2026-09-18)
+
+Where the code differs from, or adds to, the text above:
 
 - **Piece heights changed.** The v0 ladder is superseded: pawn 0.58 · rook 0.70 · knight 0.80 ·
   bishop 0.88 · queen 1.02 · king 1.18, with narrower bases (height/width ≈ 2.03, was ≈ 1.7).
   Anything that frames a camera or sizes a lift from piece height should read `HEIGHTS`, not a constant.
 - **`createMaterialSet(theme, palette, { unlit, contrast })`** — third argument is additive; two-argument
   calls are unchanged. The set gained `setUnlit`, `setContrast`, `whiteAccent`, `blackAccent`, `contactShadow`.
-- **`view.setMaterialSet(matSet)` is a new integrator obligation**: call it after `createMaterialSet` and
-  after every theme change, or the lighting master switch never reaches the materials.
+- **`main.js` must call `view.setMaterialSet(matSet)`** after `createMaterialSet` and after every theme
+  change, or the lighting master switch never reaches the materials.
 - **`actions.registerEngine(engine)`** must be called once after `createEngine`, or self-play against
   Stockfish only sets state and the engine never actually moves.
 - **The piece layer holds two set slots** (`setSet` for 3D, `setSet2d` for 2D) so a 2D session cannot be
@@ -696,35 +709,31 @@ Deviations and additions the builders landed, recorded so the document keeps mat
   so the azimuth stays defined and `rotateSeat` is the same code in both modes.
 - **A superseded 2D → 3D transition restores the lens** (fov/near/far/zoom/up) even though the superseding
   command keeps the camera's position, and `setPreset` always re-establishes `FOV_3D`. Without both, clicking
-  a View preset during the transition left the 2D lens in 3D mode permanently — found in the browser, fixed.
+  a View preset during the transition would leave the 2D lens in 3D mode permanently.
 - **The clock is shown only while a timed game is under way** (running, started, flagged, or self-play on),
   not merely because a time control is configured — the board is an analysis tool most of the time.
 - New store event **`mcp:change`**; `window.chess.mcp` added to the public API; `selfPlay.playerSide` added
   to the state; the clock is deliberately **not** persisted (only its time control is).
 
-# Addendum v2 (2026-09-18) — the live seat: real-time play against an agent
+# Addendum v2 (2026-09-18) — the live seat: real-time play against an AI
 
-**The ask.** The player moves on the board; that act alone prompts the agent, which answers with a move.
+**The goal.** The player moves on the board; that act alone prompts the AI, which answers with a move.
 No button, no copied packet, no typed turn. The move *is* the prompt.
 
 **What already existed and does not change:** the page publishes on every position change; the published
 payload carries `awaiting: 'white'|'black'|null`, which is the request for a move; the page polls
 `/commands?since=n` at 700 ms and acks what it did. That loop is untouched.
 
-**The three gaps this addendum closes:**
-
-1. Nothing outside the Python process could *enqueue* a command — `submit()` was reachable only from the
-   FastMCP tools. An agent driving the board from a shell could watch but not play.
-2. Nothing *woke* the agent. A page cannot invoke a Claude Code turn; the agent must be watching a stream.
-3. The kind of opponent (silent / annotating / coaching) lived nowhere, so it had to be restated in prose
-   every session instead of being a property of the board.
+**What this addendum adds:** a page cannot start an AI's turn, so an AI playing live has to be watching
+for requests; and the kind of opponent (silent / annotating / coaching) has to be a property of the board,
+not something restated in every conversation.
 
 ## New vocabulary
 
 | Term | Meaning |
 |---|---|
-| Live seat | An agent watching the bridge and answering `awaiting` requests as they appear |
-| Style | What kind of opponent the agent is: `silent`, `annotate`, `coach`. The page owns it; the agent obeys it |
+| Live seat | An AI client watching for `awaiting` requests and answering them as they appear |
+| Style | What kind of opponent the AI is: `silent`, `annotate`, `coach`. The page owns it; the AI obeys it |
 | Request | One published state with `awaiting` naming a colour. Identified by `(fen, awaiting)` |
 
 ## Settings (added to `SETTINGS_DEFAULTS.selfPlay`; core owns them)
@@ -737,62 +746,21 @@ payload carries `awaiting: 'white'|'black'|null`, which is the request for a mov
 any input, `'annotate'` for junk. Anything reading the style goes through `normalizeAiStyle` — a stored
 settings blob from an older build, or a hand-edited one, must never publish an unknown style.
 
-**Style contract (what the agent must do), normative:**
+**Style contract (what the AI must do), normative:**
 
 - `silent` — play the move. Do not annotate, do not note. Nothing on the board but the move.
 - `annotate` — play the move, and attach to *that* node one short note (why) plus at most two arrows and
   two highlights. Never annotate any other node.
-- `coach` — `annotate`, plus: if her previous move was a clear mistake, say so in the note and draw the
+- `coach` — `annotate`, plus: if the player's previous move was a clear mistake, say so in the note and draw the
   refutation. Judgement call, not an engine verdict; silence is correct when the move was fine.
 
-## `ai/mcpBridge.js` — OWNER: mcp agent
+## `ai/mcpBridge.js`
 
 - The published payload gains **`ai_style`**, always one of the three strings, normalized at publish time.
-  It sits next to `opponent` and `awaiting` as part of the request, so the agent needs no out-of-band config.
+  It sits next to `opponent` and `awaiting` as part of the request, so the AI needs no out-of-band config.
 - No change to publish cadence, backoff, polling, or the command/ack path.
 
-## `mcp/chess_mcp.py` — OWNER: mcp agent
-
-**New route `POST /command`** — the write path for anything that is not the FastMCP process.
-
-```
-POST /command  {"op": "play", "args": {"san_or_uci": "Nf3"}, "timeout": 20}
-  -> 200 {"ok": true,  "seq": 7, "op": "play", "result": {...}}      page applied it
-  -> 200 {"ok": false, "seq": 7, "error": "illegal move: Nf3"}        page refused it
-  -> 400 {"ok": false, "error": "unknown op 'launch'"}                never queued
-  -> 409 {"ok": false, "error": "cannot play: no chessboard page …"}  no page has connected
-```
-
-- `op` must be in `WRITE_OPS` — the same allow-list the FastMCP tools use. No new capability reaches the
-  page through this route than through MCP; it is a second door onto one lock, not a wider lock.
-- It goes through the existing `submit()`, so it waits for the page's ack and returns what the page
-  *actually did*. An illegal move comes back as an error with the reason, exactly as `play()` does.
-- `timeout` is clamped to `[1, 60]` seconds. Absent → `COMMAND_TIMEOUT`.
-- Same CORS and loopback rules as every other route. Binding stays `127.0.0.1`.
-
-**New subcommand `--watch`** — the wake-up stream, written for a line-per-event consumer (Claude Code's
-Monitor, `tail`, anything).
-
-```
-python mcp/chess_mcp.py --watch [--interval 1.0] [--as black]
-```
-
-- Polls `GET /state` on its own bridge and writes **one line to stdout per event**, flushed immediately.
-- A **request** event fires when `awaiting` names a colour and `(fen, awaiting)` differs from the last
-  request emitted. Re-publishes of an outstanding request do **not** re-fire — one request, one wake.
-- `--as <colour>` restricts request events to that colour. Absent → any colour.
-- It must also emit on every **terminal or broken** state, because silence and success must not look alike:
-  - `GAMEOVER` once when `status` stops being ongoing (checkmate, stalemate, draw).
-  - `FLAG` once when a clock flags.
-  - `BRIDGE` when the bridge cannot be reached, and again when it comes back. Transient failures must not
-    kill the watcher.
-- It never writes to the bridge. A watcher can run alongside the FastMCP server or alone.
-- Line format — one line, human-readable, parseable by eye:
-  `MOVE awaiting=black style=annotate ply=3 last=e7e5(e5) status=playing clock=4:58/5:00 fen=<fen>`
-  `status` is the **first word** of the page's status text (`playing` / `check` / `checkmate` / `stalemate`
-  / `draw` / `game`), because that text carries spaces and this line is read as `key=value` pairs.
-
-## `ui/` — OWNER: ui agent
+## `ui/`
 
 - The Self-play block gains a **Style** segmented control (Silent / Annotate / Coach) writing
   `selfPlay.aiStyle`. It is shown only when the opponent is `ai` — the setting is meaningless otherwise,
@@ -802,14 +770,6 @@ python mcp/chess_mcp.py --watch [--interval 1.0] [--as black]
 
 ## Addendum v2 — as built
 
-- `POST /command` answers with **four** codes, not two. The draft had "queued or not"; a command can also be
-  queued and then never answered, which is neither a refusal nor a missing page. `BridgeError` now carries a
-  `kind` (`no_page` / `refused` / `timeout`) and the route maps it: **400** op not in the allow-list (nothing
-  queued) · **409** no page (nothing queued) · **504** queued, never acked · **200** the page answered, with
-  `ok` saying whether it played or refused. Found by the timeout test, which had asserted the wrong thing.
-- The watcher's event rules live in a `Watcher` class with a pure `step(state) -> list[str]`; `_watch` is
-  only HTTP, sleeping and printing. That is what makes "one wake per request, none per re-publish" testable
-  without spawning a process.
 - `settings.selfPlay.aiStyle` is validated by `normalizeAiStyle` at **publish** time, not at write time —
   `setSetting` takes any path, so the guarantee has to sit where the value leaves the page.
 
@@ -818,18 +778,12 @@ python mcp/chess_mcp.py --watch [--interval 1.0] [--as black]
 - `normalizeAiStyle` maps each valid style to itself and every junk input (`undefined`, `''`, `'COACH'`,
   numbers, objects) to `'annotate'`.
 - The published payload carries a valid `ai_style` even when `settings.selfPlay.aiStyle` is junk.
-- `POST /command`: happy path returns the page's result; an unknown op is rejected **without queueing**
-  (assert the queue length did not grow); a refused op returns the page's error; no page ever connected
-  returns 409; timeout is clamped both ways.
-- `--watch`: one line per new request and not per re-publish; `--as` filters by colour; `GAMEOVER`, `FLAG`
-  and `BRIDGE` each fire once per transition; a failed poll does not end the loop.
 
 ---
 
-## Building and checking (everyone)
+## Building and checking
 
-- `npm run build` writes `dist/` and `../chessboard.html`. **Do not run it while other agents are working** — it clobbers shared output.
-  To check your own module compiles: `npx esbuild src/<your>/<file>.js --bundle --format=esm --outfile="<scratch>/check.js" --log-level=warning`
-  (use the session scratchpad path you are given). For pure modules add `test/<module>.test.mjs` runnable with `node --test test/`.
-- Windows console is cp1252: keep any `console.log` in node scripts ASCII.
-- Never write outside your owned files. Never edit `CONTRACT.md` — report gaps in your final message instead.
+- `npm run build` (`node build.mjs`) writes `dist/` and, unless `--no-single` is passed, `../chessboard.html`.
+  To check that one module compiles: `npx esbuild src/<dir>/<file>.js --bundle --format=esm --outfile="<temp dir>/check.js" --log-level=warning`.
+  For pure modules add `test/<module>.test.mjs`, run with `node --test`.
+- Windows consoles are often cp1252: keep any `console.log` in node scripts ASCII.

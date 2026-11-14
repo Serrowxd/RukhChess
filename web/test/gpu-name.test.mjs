@@ -1,12 +1,11 @@
-// test/gpu-name.test.mjs - the graphics adapter name shown in Settings > About (three/gpuName.js).
-// Run from the app root:  node --test test/gpu-name.test.mjs
+// The graphics adapter name shown in Settings > About (three/gpuName.js).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { cleanGpuName, readGpuName } from '../src/three/gpuName.js';
 
 test('ANGLE renderer strings are cut down to the adapter name', () => {
-  assert.equal(cleanGpuName('ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 (0x00002C02) Direct3D11 vs_5_0 ps_5_0, D3D11)'), 'NVIDIA GeForce RTX 5080');
+  assert.equal(cleanGpuName('ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 (0x00002786) Direct3D11 vs_5_0 ps_5_0, D3D11)'), 'NVIDIA GeForce RTX 4070');
   assert.equal(cleanGpuName('ANGLE (AMD, AMD Radeon(TM) Graphics (0x000013C0) Direct3D11 vs_5_0 ps_5_0, D3D11)'), 'AMD Radeon(TM) Graphics');
   assert.equal(cleanGpuName('ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)'), 'Intel(R) UHD Graphics 620');
   assert.equal(cleanGpuName('ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)'), 'Mesa Intel(R) UHD Graphics 620 (KBL GT2)');
@@ -22,6 +21,7 @@ test('no name when the string is missing', () => {
   assert.equal(cleanGpuName(undefined), '');
   assert.equal(cleanGpuName(null), '');
   assert.equal(cleanGpuName(''), '');
+
   assert.equal(readGpuName(null), '');
   assert.equal(readGpuName({ getExtension: () => null, getParameter: () => 'x' }), '');
   assert.equal(readGpuName({ getExtension: () => { throw new Error('lost'); }, getParameter: () => 'x' }), '');
@@ -31,9 +31,10 @@ test('the name is read from the debug renderer extension', () => {
   const ext = { UNMASKED_RENDERER_WEBGL: 0x9246 };
   const gl = {
     getExtension: name => (name === 'WEBGL_debug_renderer_info' ? ext : null),
-    getParameter: p => (p === 0x9246 ? 'ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 (0x00002C02) Direct3D11 vs_5_0 ps_5_0, D3D11)' : null),
+    getParameter: p => (p === 0x9246 ? 'ANGLE (NVIDIA, NVIDIA GeForce RTX 4070 (0x00002786) Direct3D11 vs_5_0 ps_5_0, D3D11)' : null),
   };
-  assert.equal(readGpuName(gl), 'NVIDIA GeForce RTX 5080');
+
+  assert.equal(readGpuName(gl), 'NVIDIA GeForce RTX 4070');
 });
 
 test('ANGLE on Vulkan: the inner device name, without the PCI id or a doubled vendor', () => {
@@ -63,7 +64,9 @@ test('placeholder strings that name no adapter give no name', () => {
 
 test('a very long run of whitespace is cleaned quickly and collapsed', () => {
   const started = Date.now();
-  assert.equal(cleanGpuName(`NVIDIA GeForce RTX 5080${' '.repeat(100000)}(0x00002C02)x`), 'NVIDIA GeForce RTX 5080');
+
+  assert.equal(cleanGpuName(`NVIDIA GeForce RTX 4070${' '.repeat(100000)}(0x00002786)x`), 'NVIDIA GeForce RTX 4070');
   assert.equal(cleanGpuName(`ANGLE (A, B${' '.repeat(100000)}Direct3D11 vs_5_0 ps_5_0, D3D11)`), 'B');
+
   assert.ok(Date.now() - started < 500, 'took too long');
 });

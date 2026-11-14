@@ -1,22 +1,3 @@
-// three/glow.js -- a soft glow around what gives off light (Estate's lit windows and its red aircraft lamps), and
-// around nothing else.
-//
-// Critique r3: the lit windows read as "flat peach tiles with no glow". A plain bloom (threshold the frame, blur,
-// add) would also flare every bright highlight -- the key's glint on porcelain, boxwood and lacquer is far brighter
-// than a window -- so this one never looks at the lit frame. It draws the scene a second time, small, with every
-// emissive material replaced by its bare emission and everything else black (still in front of what it hides),
-// blurs that at a quarter and an eighth of the canvas, and adds the two blurs over the finished frame. Only what
-// emits can glow; with nothing emissive in view the pass is skipped outright, so the other sets cost nothing.
-//
-//   createGlow(renderer) -> { render(scene, camera, scale = 1), dispose() }
-//     render() runs after the frame is drawn to the canvas (scene.js renderOnce); the owner decides when it is on
-//     (lit 3D only: the unlit look moves colour into `emissive`, and 2D has no windows to light). `scale` is the pixel
-//     ratio's factor below the screen's (motion quality): the blur steps by it, so the halo keeps its width on screen.
-// The frame is copied off the canvas and the glow added to it as light, with the exposure the frame used: decoded
-// from display values, summed, encoded again, and dithered +-0.5/255 like every other gradient in the app. Added
-// straight onto display values instead, a faint halo came out several times too strong in the dark concrete and a
-// window already near white went to white.
-
 import * as THREE from 'three';
 
 /** Strength and shape. Emission below `threshold` (linear, before exposure) does not glow; `knee` softens that. */
@@ -50,8 +31,7 @@ const BLUR_F = [
   '}',
 ].join('\n');
 
-// the two blurs, exposed like the frame, added to the frame as light (decoded from its display values, the sum
-// encoded again) -- so a halo in the dark concrete shows while a window already near white barely moves -- dithered
+// the two blurs, exposed like the frame, added to the frame in linear light, dithered
 const ADD_F = [
   'uniform sampler2D tFrame; uniform sampler2D tNear; uniform sampler2D tWide;',
   'uniform float uNear; uniform float uWide; uniform float uExposure;',
@@ -72,10 +52,12 @@ const ADD_F = [
   '}',
 ].join('\n');
 
-/** Does this material give off light (and is it not the unlit look, which parks its colour in `emissive`)? */
+/** Does this material give off light? The unlit look parks its colour in `emissive` and does not count. */
 export function emitsLight(m) {
   if (!m || !m.emissive || (m.userData && m.userData.litBackup) || m.visible === false) return false;
+
   const k = m.emissiveIntensity ?? 1;
+
   return k > 0 && m.emissive.r + m.emissive.g + m.emissive.b > 0;
 }
 
@@ -83,6 +65,7 @@ export function createGlow(renderer) {
   const target = (depth) => new THREE.WebGLRenderTarget(1, 1, {
     type: THREE.HalfFloatType, depthBuffer: depth, stencilBuffer: false, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
   });
+
   const rtEmit = target(true);                  // the emission, at half size, multisampled: a small far window
   rtEmit.samples = 4;                           // would otherwise alias into glitter in the blurred glow
   const q1 = target(false), q2 = target(false);  // quarter size: pick + blur ping-pong
@@ -91,16 +74,20 @@ export function createGlow(renderer) {
 
   const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
   const quadGeo = new THREE.PlaneGeometry(2, 2);
+
   const pass = (fragmentShader, uniforms, extra = {}) => new THREE.ShaderMaterial({
     vertexShader: QUAD_V, fragmentShader, uniforms, depthTest: false, depthWrite: false, toneMapped: false, ...extra,
   });
+
   const pick = pass(PICK_F, { tMap: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: GLOW.threshold }, uKnee: { value: GLOW.knee } });
   const blur = pass(BLUR_F, { tMap: { value: null }, uDir: { value: new THREE.Vector2() } });
   let frame = null;   // the canvas, copied (a FramebufferTexture has a fixed size: rebuilt when the canvas changes)
+
   const add = pass(ADD_F, {
     tFrame: { value: null }, tNear: { value: q1.texture }, tWide: { value: e1.texture },
     uNear: { value: GLOW.near }, uWide: { value: GLOW.wide }, uExposure: { value: 1 },
   }, { blending: THREE.NoBlending });
+
   const quad = new THREE.Mesh(quadGeo, pick);
   quad.frustumCulled = false;
   const quadScene = new THREE.Scene();
@@ -108,102 +95,153 @@ export function createGlow(renderer) {
 
   const black = new THREE.MeshBasicMaterial({ color: 0x000000 });
   const emitMats = new WeakMap();   // source material -> its bare emission (kept in step every frame)
+
   function emitFor(m) {
     let e = emitMats.get(m);
-    if (!e) { e = new THREE.MeshBasicMaterial({ toneMapped: false }); emitMats.set(m, e); }
+
+    if (!e) {
+      e = new THREE.MeshBasicMaterial({ toneMapped: false });
+      emitMats.set(m, e);
+    }
+
     e.color.copy(m.emissive).multiplyScalar(m.emissiveIntensity ?? 1);
-    if (e.map !== (m.emissiveMap || null)) { e.map = m.emissiveMap || null; e.needsUpdate = true; }
+
+    if (e.map !== (m.emissiveMap || null)) {
+      e.map = m.emissiveMap || null;
+      e.needsUpdate = true;
+    }
+
     e.side = m.side;
+
     return e;
   }
 
   const size = new THREE.Vector2();
+
   function fit() {
     renderer.getDrawingBufferSize(size);
+
     const w = Math.max(1, size.x), h = Math.max(1, size.y);
     const dims = [[w / 2, h / 2], [w / 4, h / 4], [w / 4, h / 4], [w / 8, h / 8], [w / 8, h / 8]];
+
     targets.forEach((t, i) => {
       const tw = Math.max(1, Math.round(dims[i][0])), th = Math.max(1, Math.round(dims[i][1]));
       if (t.width !== tw || t.height !== th) t.setSize(tw, th);
     });
   }
+
   function run(material, src, dst) {
     quad.material = material;
     if (material.uniforms.tMap) material.uniforms.tMap.value = src;
     renderer.setRenderTarget(dst);
     renderer.render(quadScene, camera);
   }
+
   function blurInto(a, b, scale) {   // a -> b (horizontal) -> a (vertical)
     blur.uniforms.uDir.value.set(scale / a.width, 0);
     run(blur, a.texture, b);
+
     blur.uniforms.uDir.value.set(0, scale / a.height);
     run(blur, b.texture, a);
   }
 
   const swapped = [];   // [mesh, material, visible] for the emission pass
+
   return {
     /** Add the glow over the frame just drawn; false (and nothing drawn) when nothing in `scene` emits. */
     render(scene, sceneCamera, scale = 1) {
       let any = false;
       swapped.length = 0;
+
       scene.traverseVisible((o) => {
         if (!o.isMesh) return;
+
         const m = o.material;
-        if (Array.isArray(m) || !m) { swapped.push([o, m, o.visible]); o.visible = false; return; }
+
+        if (Array.isArray(m) || !m) {
+          swapped.push([o, m, o.visible]);
+          o.visible = false;
+          return;
+        }
+
         const glows = emitsLight(m);
         any = any || glows;
         swapped.push([o, m, o.visible]);
+
         if (glows) o.material = emitFor(m);
         else if (m.transparent) o.visible = false;
         else o.material = black;
       });
+
       if (!any) {
-        for (const [o, m, v] of swapped) { o.material = m; o.visible = v; }
+        for (const [o, m, v] of swapped) {
+          o.material = m;
+          o.visible = v;
+        }
+
         swapped.length = 0;
         return false;
       }
+
       fit();
+
       const prev = {
         target: renderer.getRenderTarget(), autoClear: renderer.autoClear, alpha: renderer.getClearAlpha(),
         color: renderer.getClearColor(new THREE.Color()), shadows: renderer.shadowMap.autoUpdate,
         background: scene.background, exposure: renderer.toneMappingExposure,
       };
+
       scene.background = null;
       renderer.shadowMap.autoUpdate = false;
       renderer.autoClear = true;
       renderer.setClearColor(0x000000, 1);
       renderer.setRenderTarget(rtEmit);
       renderer.render(scene, sceneCamera);
-      for (const [o, m, v] of swapped) { o.material = m; o.visible = v; }
+
+      for (const [o, m, v] of swapped) {
+        o.material = m;
+        o.visible = v;
+      }
+
       swapped.length = 0;
       scene.background = prev.background;
 
       pick.uniforms.uTexel.value.set(0.5 / rtEmit.width, 0.5 / rtEmit.height);
       run(pick, rtEmit.texture, q1);
       blurInto(q1, q2, scale);
+
       pick.uniforms.uTexel.value.set(0.5 / q1.width, 0.5 / q1.height);
-      pick.uniforms.uThreshold.value = 0; pick.uniforms.uKnee.value = 1e-3;   // q1 is already thresholded
+      pick.uniforms.uThreshold.value = 0;   // q1 is already thresholded
+      pick.uniforms.uKnee.value = 1e-3;
       run(pick, q1.texture, e1);
-      pick.uniforms.uThreshold.value = GLOW.threshold; pick.uniforms.uKnee.value = GLOW.knee;
+
+      pick.uniforms.uThreshold.value = GLOW.threshold;
+      pick.uniforms.uKnee.value = GLOW.knee;
       blurInto(e1, e2, scale);
       blurInto(e1, e2, scale);
 
       renderer.setRenderTarget(prev.target);
+
       if (!frame || frame.image.width !== size.x || frame.image.height !== size.y) {
         if (frame) frame.dispose();
         frame = new THREE.FramebufferTexture(size.x, size.y);
         add.uniforms.tFrame.value = frame;
       }
+
       renderer.copyFramebufferToTexture(frame);
       add.uniforms.uExposure.value = prev.exposure;
+
       renderer.autoClear = false;
       quad.material = add;
       renderer.render(quadScene, camera);
+
       renderer.autoClear = prev.autoClear;
       renderer.setClearColor(prev.color, prev.alpha);
       renderer.shadowMap.autoUpdate = prev.shadows;
+
       return true;
     },
+
     dispose() {
       for (const t of targets) t.dispose();
       if (frame) frame.dispose();

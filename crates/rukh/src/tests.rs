@@ -1,5 +1,4 @@
-//! Tests that run the real server on a free port (port 0) inside the test process: the hub, the
-//! Host/Origin guard, static files, the view WebSocket, and the MCP tools over real HTTP.
+//! Tests against the real server on a free port: hub, guard, static files, socket and MCP.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -43,6 +42,7 @@ async fn raw(
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect");
+
     let mut request = format!("{method} {path} HTTP/1.1\r\n");
     if !headers
         .iter()
@@ -62,16 +62,19 @@ async fn raw(
     if !body.is_empty() {
         request.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
+
     request.push_str("\r\n");
     request.push_str(body);
+
     stream
         .write_all(request.as_bytes())
         .await
         .expect("send request");
-    // Read until the head and the Content-Length body are in (a WebSocket request keeps the
-    // connection open, so end of stream cannot be the signal), or until the server closes.
+
+    // A WebSocket upgrade keeps the connection open, so end of stream is not the signal.
     let mut response = Vec::new();
     let mut buf = [0u8; 8192];
+
     loop {
         let text = String::from_utf8_lossy(&response).to_string();
         if let Some((head, body)) = text.split_once("\r\n\r\n") {
@@ -89,6 +92,7 @@ async fn raw(
             _ => break,
         }
     }
+
     let text = String::from_utf8_lossy(&response).to_string();
     let status = text
         .split_whitespace()
@@ -110,10 +114,12 @@ async fn two_watch_receivers_see_the_same_rev_after_a_move() {
     let hub = Hub::new("test".into());
     let mut a = hub.subscribe();
     let mut b = hub.subscribe();
+
     let applied = hub
         .apply("view:1", r#"{"op":"play","move":"e4"}"#, Some(3))
         .expect("e4 is legal");
     assert_eq!(applied.rev, 1);
+
     tokio::time::timeout(WAIT, a.changed())
         .await
         .expect("a woke")
@@ -122,10 +128,12 @@ async fn two_watch_receivers_see_the_same_rev_after_a_move() {
         .await
         .expect("b woke")
         .expect("open");
+
     let (fa, fb) = (a.borrow_and_update().clone(), b.borrow_and_update().clone());
     assert_eq!(fa.rev, 1);
     assert_eq!(fa.rev, fb.rev);
     assert_eq!(fa.json, fb.json);
+
     let frame: Value = serde_json::from_str(&fa.json).expect("JSON");
     assert_eq!(frame["t"], "state");
     assert_eq!(frame["instance"], "test");
@@ -164,6 +172,7 @@ fn a_refused_intent_publishes_nothing() {
 #[test]
 fn an_intent_that_changes_nothing_publishes_nothing() {
     let hub = Hub::new("test".into());
+
     let applied = hub
         .apply("view:1", r#"{"op":"back"}"#, None)
         .expect("back at the start is accepted");
@@ -189,6 +198,7 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
         h.extend(extra);
         h
     };
+
     let mcp_body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
     let mcp = |extra: Vec<(&'static str, String)>| {
         let mut h = vec![
@@ -198,8 +208,8 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
         h.extend(extra);
         h
     };
-    // Every route answers a bad request with the guard's own text, which proves the guard (and
-    // not some later layer, such as the MCP service's own host check) refused it.
+
+    // The guard's own text proves the guard refused it, not a later layer.
     let routes: Vec<Route> = vec![
         ("GET", "/api/hello", vec![], ""),
         ("GET", "/api/ws", ws(vec![]), ""),
@@ -207,6 +217,7 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
         ("GET", "/", vec![], ""),
         ("GET", "/app.js", vec![], ""),
     ];
+
     let bad_headers: Vec<Vec<(&'static str, String)>> = vec![
         vec![("Origin", "http://evil.example".to_string())],
         vec![(
@@ -229,6 +240,7 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
             ("Origin", "http://evil.example".to_string()),
         ],
     ];
+
     for bad in &bad_headers {
         for (method, path, base, body) in &routes {
             let mut headers = base.clone();
@@ -251,6 +263,7 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
         !head.contains("access-control-allow-origin"),
         "no CORS headers: {head}"
     );
+
     let localhost = ("Host", format!("localhost:{port}"));
     assert_eq!(
         raw(port, "GET", "/api/hello", &[localhost], "").await.0,
@@ -265,6 +278,7 @@ async fn foreign_host_and_origin_get_403_on_every_route() {
     )
     .await;
     assert_eq!(status, 101);
+
     server.stop().await;
 }
 
@@ -280,6 +294,7 @@ async fn hello_names_the_app() {
     assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(hello["instance"], server.hub.instance());
     assert_eq!(hello["link"], format!("http://127.0.0.1:{}/", server.port));
+
     server.stop().await;
 }
 
@@ -301,6 +316,7 @@ async fn static_files_are_served_with_their_types() {
     assert!(head.contains("content-type: application/wasm"), "{head}");
     assert_eq!(raw(port, "GET", "/sub/page.txt", &[], "").await.0, 200);
     assert_eq!(raw(port, "GET", "/missing.js", &[], "").await.0, 404);
+
     server.stop().await;
 }
 
@@ -329,6 +345,7 @@ async fn static_files_refuse_path_traversal() {
             "{path} leaked a file"
         );
     }
+
     server.stop().await;
 }
 
@@ -404,6 +421,7 @@ async fn view(port: u16) -> (Socket, Value) {
     assert_eq!(hello["t"], "hello");
     assert_eq!(next_any(&mut socket).await["t"], "state");
     assert_eq!(next_any(&mut socket).await["t"], "presence");
+
     (socket, hello)
 }
 
@@ -411,6 +429,7 @@ async fn view(port: u16) -> (Socket, Value) {
 async fn intent(socket: &mut Socket, id: u64, mut body: Value) -> Value {
     body["t"] = json!("intent");
     body["id"] = json!(id);
+
     send(socket, body).await;
     ack_for(socket, id).await
 }
@@ -629,6 +648,7 @@ async fn socket_carries_navigation_and_match_intents() {
         frame["state"]["game"]["nodes"][3]["note"],
         "Development first."
     );
+
     server.stop().await;
 }
 
@@ -649,6 +669,7 @@ async fn an_oversized_message_gets_a_readable_refusal() {
             .is_some_and(|m| m.contains("the limit is 65536")),
         "{ack}"
     );
+
     // The socket and the game carry on.
     send(
         &mut a,
@@ -657,6 +678,7 @@ async fn an_oversized_message_gets_a_readable_refusal() {
     .await;
     assert_eq!(next_json(&mut a).await["rev"], 1);
     assert_eq!(next_json(&mut a).await["ok"], true);
+
     server.stop().await;
 }
 
@@ -668,8 +690,7 @@ fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Posts one JSON-RPC message to /mcp. For a request, returns every message on the SSE stream up
-/// to and including the response with that id.
+/// For a request, returns every SSE message up to and including its response.
 async fn rpc(
     client: &reqwest::Client,
     port: u16,
@@ -682,11 +703,13 @@ async fn rpc(
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .body(body.to_string());
+
     if let Some(session) = session {
         request = request
             .header("mcp-session-id", session)
             .header("mcp-protocol-version", "2025-06-18");
     }
+
     let mut response = request.send().await.expect("POST /mcp");
     let status = response.status();
     let session_id = response
@@ -694,11 +717,14 @@ async fn rpc(
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+
     let Some(id) = body.get("id").cloned() else {
         return (status, session_id, Vec::new());
     };
+
     let mut text = String::new();
     let deadline = tokio::time::Instant::now() + within;
+
     loop {
         let messages: Vec<Value> = text
             .lines()
@@ -708,6 +734,7 @@ async fn rpc(
         if messages.iter().any(|m| m.get("id") == Some(&id)) {
             return (status, session_id, messages);
         }
+
         let chunk = tokio::time::timeout_at(deadline, response.chunk())
             .await
             .expect("MCP answered in time")
@@ -734,6 +761,7 @@ impl Ai {
             .no_proxy()
             .build()
             .expect("HTTP client");
+
         let (status, session, messages) = rpc(
             &client,
             port,
@@ -745,6 +773,7 @@ impl Ai {
         )
         .await;
         assert_eq!(status, 200);
+
         let ai = Ai {
             client,
             port,
@@ -752,6 +781,7 @@ impl Ai {
             by: format!("ai:{name}"),
         };
         let init = messages.last().cloned().expect("initialize result");
+
         let (status, _, _) = rpc(
             &ai.client,
             port,
@@ -761,6 +791,7 @@ impl Ai {
         )
         .await;
         assert_eq!(status, 202);
+
         (ai, init)
     }
 
@@ -775,6 +806,7 @@ impl Ai {
             Duration::from_secs(30),
         )
         .await;
+
         let last = messages.pop().expect("a response");
         assert!(last.get("error").is_none(), "{last}");
         (last["result"].clone(), messages)
@@ -886,6 +918,7 @@ async fn mcp_lists_four_tools_two_prompts_and_the_style_rules() {
         .as_str()
         .expect("prompt text");
     assert!(text.contains("for=\"any_change\""), "{text}");
+
     server.stop().await;
 }
 
@@ -937,6 +970,7 @@ async fn an_ai_is_not_woken_by_its_own_move_and_a_move_between_waits_returns_at_
     assert_eq!(event["to_move"], "ai");
     assert_eq!(event["style"]["name"], "annotate");
     assert_eq!(event["style"]["rule"], rukh_core::session::RULE_ANNOTATE);
+
     // Level-triggered: asking again before moving is answered again.
     let again = ai.call("wait", json!({"timeout_s": 5})).await;
     assert_eq!(structured(&again)["event"], "your_turn");
@@ -981,6 +1015,7 @@ async fn an_ai_is_not_woken_by_its_own_move_and_a_move_between_waits_returns_at_
     assert_eq!(refused["isError"], true, "{refused}");
     assert!(prose(&refused).contains("It is not your turn"), "{refused}");
     assert_eq!(hub.latest().rev, rev);
+
     server.stop().await;
 }
 
@@ -998,6 +1033,7 @@ async fn browsing_away_from_tip_never_fires_your_turn_and_play_lands_on_the_tip(
     assert_eq!(structured(&result)["event"], "your_turn", "{result}");
     let played = ai.call("play", json!({"move": "e4", "from_node": 0})).await;
     assert_ne!(played["isError"], true, "{played}");
+
     // A hand move from the tip moves the tip.
     let ack = intent(
         &mut page,
@@ -1043,6 +1079,7 @@ async fn browsing_away_from_tip_never_fires_your_turn_and_play_lands_on_the_tip(
     assert_eq!(new["parent"], 2);
     assert_eq!(frame["state"]["match"]["tip"], node);
     assert_eq!(frame["state"]["game"]["current"], node);
+
     server.stop().await;
 }
 
@@ -1102,6 +1139,7 @@ async fn an_ai_annotation_between_wait_and_play_refuses_nothing() {
     let stale = ai.call("play", json!({"move": "e6", "from_node": 1})).await;
     assert_eq!(stale["isError"], true, "{stale}");
     assert!(prose(&stale).contains("The board has moved on"), "{stale}");
+
     server.stop().await;
 }
 
@@ -1177,6 +1215,7 @@ async fn a_coach_is_not_woken_by_its_own_annotation_but_another_client_is() {
             .map(|b| b.starts_with("view:")),
         Some(true)
     );
+
     server.stop().await;
 }
 
@@ -1201,6 +1240,7 @@ async fn get_game_and_wait_without_a_seat() {
     assert_eq!(refused["isError"], true, "{refused}");
     assert!(prose(&refused).contains("seat=\"white\""), "{refused}");
     assert_eq!(server.hub.latest().rev, 0);
+
     server.stop().await;
 }
 
@@ -1242,6 +1282,7 @@ async fn presence_shows_a_waiting_client_and_bumps_no_rev() {
         .expect("returned")
         .expect("ran");
     assert_eq!(structured(&result)["event"], "timeout");
+
     // When the wait ends, the page hears that too.
     loop {
         let message = next_any(&mut page).await;
@@ -1251,6 +1292,7 @@ async fn presence_shows_a_waiting_client_and_bumps_no_rev() {
         }
     }
     assert_eq!(server.hub.latest().rev, 0);
+
     server.stop().await;
 }
 
@@ -1280,6 +1322,7 @@ async fn a_foreign_origin_is_refused_on_a_long_wait() {
         assert!(started.elapsed() < Duration::from_secs(2));
     }
     assert!(!server.hub.presence().is_waiting("ai:victim"));
+
     server.stop().await;
 }
 
@@ -1311,6 +1354,7 @@ async fn cancelling_a_wait_frees_it() {
     until("the wait to end", || !hub.presence().is_waiting(&ai.by)).await;
     assert!(started.elapsed() < Duration::from_secs(5));
     pending.abort();
+
     server.stop().await;
 }
 
@@ -1332,6 +1376,7 @@ async fn a_long_wait_reports_progress_when_asked() {
         .collect();
     assert!(!progress.is_empty(), "{before:?}");
     assert_eq!(progress[0]["params"]["progressToken"], "p-1");
+
     server.stop().await;
 }
 
@@ -1356,6 +1401,7 @@ async fn a_seat_the_person_gave_the_ai_cannot_be_swapped_by_wait() {
         .call("wait", json!({"seat": "black", "timeout_s": 1}))
         .await;
     assert_eq!(structured(&ok)["event"], "timeout", "{ok}");
+
     server.stop().await;
 }
 
@@ -1369,8 +1415,7 @@ async fn pending_black_wait(hub: &std::sync::Arc<Hub>, ai: &Ai) -> tokio::task::
     pending
 }
 
-/// The person's control during an open wait ends that wait at once with game_over and the
-/// reason, and the AI's next wait(seat) does not undo it.
+/// A control during an open wait ends it with game_over; the next wait(seat) does not undo it.
 async fn a_control_ends_the_loop(control: Value, stopped: &str, refusal: &str) {
     let server = serve("web").await;
     let hub = server.hub.clone();
@@ -1403,9 +1448,11 @@ async fn a_control_ends_the_loop(control: Value, stopped: &str, refusal: &str) {
     assert_eq!(again["isError"], true, "{again}");
     assert!(prose(&again).contains(refusal), "{again}");
     assert_eq!(hub.latest().rev, rev, "the refused claim changed nothing");
+
     // The seat shown in presence went with the match.
     let presence: Value = serde_json::from_str(&hub.presence().message()).expect("presence");
     assert_eq!(presence["ais"][0]["seat"], Value::Null, "{presence}");
+
     server.stop().await;
 }
 
@@ -1493,6 +1540,7 @@ async fn set_eval_while_waits_are_open_wakes_nobody_and_refuses_nothing() {
         .call("play", json!({"move": "e5", "from_node": node}))
         .await;
     assert_ne!(played["isError"], true, "{played}");
+
     server.stop().await;
 }
 
@@ -1526,6 +1574,7 @@ async fn results_carry_the_json_in_content_and_the_prose_in_structured() {
         serde_json::from_str(timeout["content"][1]["text"].as_str().unwrap_or(""))
             .unwrap_or_default();
     assert_eq!(json_block, *structured(&timeout));
+
     server.stop().await;
 }
 
@@ -1549,6 +1598,7 @@ async fn tool_schemas_are_plain() {
     assert_eq!(arrow["type"], "object", "{play}");
     assert_eq!(arrow["description"], "An arrow from one square to another.");
     assert_eq!(play["inputSchema"]["required"], json!(["move"]));
+
     server.stop().await;
 }
 
@@ -1560,6 +1610,7 @@ async fn a_client_is_listed_as_soon_as_it_connects() {
     let (_ai, _) = Ai::connect(server.port, "early-bird").await;
     let presence: Value = serde_json::from_str(&server.hub.presence().message()).expect("presence");
     assert_eq!(presence["ais"][0]["name"], "early-bird", "{presence}");
+
     server.stop().await;
 }
 
@@ -1605,6 +1656,7 @@ async fn a_coach_with_the_same_name_as_the_player_is_told_about_its_moves() {
     let event = structured(&result);
     assert_eq!(event["event"], "changed", "{result}");
     assert_eq!(event["since_last"][0]["san"], "e5");
+
     // Passing seat with any_change took nothing, and the coach holds no seat.
     assert_eq!(event["your_seat"], Value::Null, "{result}");
     assert_eq!(
@@ -1623,6 +1675,7 @@ async fn a_coach_with_the_same_name_as_the_player_is_told_about_its_moves() {
     let refused = coach.call("play", json!({"move": "Nc6"})).await;
     assert_eq!(refused["isError"], true, "{refused}");
     assert!(prose(&refused).contains("is played by twin"), "{refused}");
+
     server.stop().await;
 }
 
@@ -1641,6 +1694,7 @@ async fn a_play_without_from_node_is_guarded_by_the_last_your_turn() {
     .await;
     let turn = ai.call("wait", json!({"timeout_s": 5})).await;
     assert_eq!(structured(&turn)["node"], 1);
+
     // The person plays a move for each side by hand while the AI thinks.
     intent(
         &mut page,
@@ -1660,11 +1714,13 @@ async fn a_play_without_from_node_is_guarded_by_the_last_your_turn() {
         prose(&refused).contains("The board has moved on"),
         "{refused}"
     );
+
     // After reading the position again it can play.
     let turn = ai.call("wait", json!({"timeout_s": 5})).await;
     assert_eq!(structured(&turn)["node"], 3);
     let played = ai.call("play", json!({"move": "Nc6"})).await;
     assert_ne!(played["isError"], true, "{played}");
+
     server.stop().await;
 }
 
@@ -1712,6 +1768,7 @@ async fn after_the_ai_mates_a_new_game_lets_it_play_again() {
         "{again}"
     );
     assert!(server.hub.read(|t| t.match_state().active));
+
     server.stop().await;
 }
 
@@ -1756,6 +1813,7 @@ async fn swapping_sides_mid_match_tells_the_ai_its_new_seat() {
     assert_eq!(structured(&turn)["event"], "your_turn", "{turn}");
     let presence: Value = serde_json::from_str(&hub.presence().message()).expect("presence");
     assert_eq!(presence["ais"][0]["seat"], "white", "{presence}");
+
     server.stop().await;
 }
 
@@ -1773,6 +1831,7 @@ async fn a_refused_play_or_a_fresh_read_replaces_the_implied_from_node() {
     intent(&mut page, 3, json!({"op": "play", "move": "Qh5"})).await;
     let refused = ai.call("play", json!({"move": "Nf6"})).await;
     assert_eq!(refused["isError"], true, "{refused}");
+
     // The refusal let go of node 1, so the next move is played at the tip.
     let played = ai.call("play", json!({"move": "Nc6"})).await;
     assert_ne!(played["isError"], true, "{played}");
@@ -1791,6 +1850,7 @@ async fn a_refused_play_or_a_fresh_read_replaces_the_implied_from_node() {
         .call("play", json!({"move": "Nf3", "from_node": 0}))
         .await;
     assert_eq!(stale["isError"], true, "{stale}");
+
     server.stop().await;
 }
 
@@ -1839,6 +1899,7 @@ async fn a_second_session_with_the_same_name_never_takes_over_the_first() {
         .map(|ais| ais.iter().filter_map(|a| a["name"].as_str()).collect())
         .unwrap_or_default();
     assert_eq!(names, ["same", "same (2)"], "{presence}");
+
     server.stop().await;
 }
 
@@ -1882,6 +1943,7 @@ async fn a_client_that_quits_while_it_owes_a_move_expires() {
     assert_eq!(structured(&turn)["event"], "your_turn", "{turn}");
     let played = fresh.call("play", json!({"move": "e5"})).await;
     assert_ne!(played["isError"], true, "{played}");
+
     server.stop().await;
 }
 

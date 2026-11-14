@@ -1,5 +1,4 @@
-//! The HTTP side: one router on 127.0.0.1 serving the board's files, `/api/hello`, the view
-//! WebSocket and MCP, all behind one Host/Origin guard.
+//! The HTTP side: board files, `/api/hello`, the view socket and MCP, behind one Host/Origin guard.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -25,7 +24,7 @@ pub struct AppState {
     pub web_dir: PathBuf,
     /// Numbers views as `view:1`, `view:2`, ...
     pub next_view: AtomicU64,
-    /// Flips to true when the program is shutting down, so open sockets close.
+    /// True while the program is shutting down.
     pub shutdown: watch::Receiver<bool>,
 }
 
@@ -35,7 +34,6 @@ impl AppState {
     }
 }
 
-/// The whole router, MCP included at `/mcp`.
 pub fn router(state: Arc<AppState>, mcp: crate::mcp::Service) -> Router {
     Router::new()
         .route("/api/hello", get(hello))
@@ -46,9 +44,7 @@ pub fn router(state: Arc<AppState>, mcp: crate::mcp::Service) -> Router {
         .with_state(state)
 }
 
-/// Lets a request through only when it is addressed to this server by its loopback name and, if it
-/// comes from a web page, that page is one of ours. This stops other websites (including DNS
-/// rebinding tricks) from reading or driving the board.
+/// Stops other websites, DNS rebinding included, from reading or driving the board.
 async fn guard(State(state): State<Arc<AppState>>, request: Request, next: Next) -> Response {
     if allowed(request.headers(), state.port) {
         next.run(request).await
@@ -69,8 +65,7 @@ async fn guard(State(state): State<Arc<AppState>>, request: Request, next: Next)
     }
 }
 
-/// Host must appear exactly once and Origin at most once: a repeated header could carry a
-/// foreign value behind an allowed one.
+/// One Host and at most one Origin: a repeated header could hide a foreign value.
 fn allowed(headers: &HeaderMap, port: u16) -> bool {
     let hosts: Vec<&HeaderValue> = headers.get_all(header::HOST).iter().collect();
     let host_ok = match hosts.as_slice() {
@@ -80,6 +75,7 @@ fn allowed(headers: &HeaderMap, port: u16) -> bool {
         },
         _ => false,
     };
+
     let origins: Vec<&HeaderValue> = headers.get_all(header::ORIGIN).iter().collect();
     let origin_ok = match origins.as_slice() {
         [] => true,
@@ -92,6 +88,7 @@ fn allowed(headers: &HeaderMap, port: u16) -> bool {
         },
         _ => false,
     };
+
     host_ok && origin_ok
 }
 
@@ -106,7 +103,6 @@ async fn hello(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     }))
 }
 
-/// Text shown at `/` when the board has not been built.
 pub fn not_built_text(web_dir: &Path) -> String {
     format!(
         "Rukh is running, but the 3D board has not been built yet.\n\n\
@@ -127,6 +123,7 @@ fn content_type(path: &Path) -> &'static str {
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
+
     match ext.as_str() {
         "html" | "htm" => "text/html; charset=utf-8",
         "js" | "mjs" => "text/javascript; charset=utf-8",
@@ -148,11 +145,12 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
-/// Decodes `%XX` escapes in a URL path. None when an escape is malformed.
+/// None when an escape is malformed.
 fn percent_decode(raw: &str) -> Option<Vec<u8>> {
     let bytes = raw.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
+
     while i < bytes.len() {
         if bytes[i] == b'%' {
             let hex = bytes.get(i + 1..i + 3)?;
@@ -164,26 +162,29 @@ fn percent_decode(raw: &str) -> Option<Vec<u8>> {
             i += 1;
         }
     }
+
     Some(out)
 }
 
-/// Turns a request path into a relative file path inside the web folder. Refuses anything that
-/// could step outside it: `..`, `.`, empty segments, backslashes, drive letters, NUL.
+/// Refuses `..`, `.`, empty segments, backslashes, drive letters and NUL.
 pub fn safe_relative_path(url_path: &str) -> Option<PathBuf> {
     let decoded = String::from_utf8(percent_decode(url_path)?).ok()?;
     let trimmed = decoded.strip_prefix('/').unwrap_or(&decoded);
+
     if trimmed.is_empty() {
         return Some(PathBuf::from("index.html"));
     }
+
     let mut out = PathBuf::new();
     let segments: Vec<&str> = trimmed.split('/').collect();
     for (i, segment) in segments.iter().enumerate() {
         let last = i + 1 == segments.len();
+
         if segment.is_empty() && last {
-            // A trailing slash asks for the folder's index page.
             out.push("index.html");
             continue;
         }
+
         if segment.is_empty()
             || *segment == "."
             || *segment == ".."
@@ -191,8 +192,10 @@ pub fn safe_relative_path(url_path: &str) -> Option<PathBuf> {
         {
             return None;
         }
+
         out.push(segment);
     }
+
     Some(out)
 }
 
@@ -208,8 +211,7 @@ fn plain(status: StatusCode, text: String) -> Response {
         .into_response()
 }
 
-/// Serves the board's files from the web folder on disk. `/` is `index.html`; when that file is
-/// missing, `/` explains how to build the board.
+/// When `index.html` is missing, `/` explains how to build the board.
 async fn static_file(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let method = request.method();
     if method != Method::GET && method != Method::HEAD {
@@ -218,10 +220,12 @@ async fn static_file(State(state): State<Arc<AppState>>, request: Request) -> Re
             "Only GET is supported here.\n".to_string(),
         );
     }
+
     let url_path = request.uri().path();
     let Some(relative) = safe_relative_path(url_path) else {
         return plain(StatusCode::BAD_REQUEST, format!("Bad path: {url_path}\n"));
     };
+
     let is_root = url_path == "/";
     let not_found = || plain(StatusCode::NOT_FOUND, format!("Not found: {url_path}\n"));
 
@@ -230,6 +234,7 @@ async fn static_file(State(state): State<Arc<AppState>>, request: Request) -> Re
         Err(_) if is_root => return plain(StatusCode::OK, not_built_text(&state.web_dir)),
         Err(_) => return not_found(),
     };
+
     let mut file = root.join(&relative);
     if tokio::fs::metadata(&file)
         .await
@@ -238,14 +243,15 @@ async fn static_file(State(state): State<Arc<AppState>>, request: Request) -> Re
     {
         file.push("index.html");
     }
-    // Resolving links and checking the result is still inside the web folder keeps a symlink in
-    // the folder from exposing files outside it.
+
+    // A symlink in the web folder must not expose files outside it.
     let resolved = match tokio::fs::canonicalize(&file).await {
         Ok(resolved) if resolved.starts_with(&root) => resolved,
         Ok(_) => return not_found(),
         Err(_) if is_root => return plain(StatusCode::OK, not_built_text(&state.web_dir)),
         Err(_) => return not_found(),
     };
+
     match tokio::fs::read(&resolved).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)

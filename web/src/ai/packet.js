@@ -1,32 +1,15 @@
-// ai/packet.js - the position packet: the text an AI reads, and its JSON twin.
-// Owns: buildContext(state, opts?) and buildPacket(state, opts?) per CONTRACT.md "ai/".
-// Added beyond the contract (all exported):
-//   formatEval(score)            -> '+0.35' | '-1.20' | '#3' | '-#2' (White's view)
-//   formatHistory(game, opts?)   -> the numbered history string with sibling variations in parentheses
-//   isKnightJump(from, to)       -> local fallback used when the Game has no static isKnightJump
-//   isSquare(s)
-// Context fields beyond the contract: title, branched_at ({ply,label}|null), next_moves (san[] of the
-// current node's children), mode, engine.source ('live'|'stored'), arrows[].source.
-// Packet lines beyond the contract, all conditional (a bare packet matches the contract exactly):
-//   title: ...            when the study has a title
-//   mode: setup           when state.mode === 'setup'
-//   next: e4, d4          when the current node has recorded continuations
-//   nag: !                when the current node carries a NAG (kept off the note line so keys stay one-per-line)
-//   arrows get a trailing [ai] / [engine] tag when their source is not the user.
-// Nothing here imports core/ - it only calls Game methods through state.game, so it runs against a fake Game in tests.
-
 const COLORS = ['green', 'red', 'blue', 'yellow'];
 const MAX_VARIATION_PLIES = 8;
 const MAX_PV_PLIES = 12;
 
-/** True when the string is a board square 'a1'..'h8'. */
 export function isSquare(s) {
   return typeof s === 'string' && /^[a-h][1-8]$/.test(s);
 }
 
-/** Knight-jump test on square names; used when the Game has no static isKnightJump. */
+/** Knight-jump test on square names, for a Game without a static isKnightJump. */
 export function isKnightJump(from, to) {
   if (!isSquare(from) || !isSquare(to)) return false;
+
   const dx = Math.abs(from.charCodeAt(0) - to.charCodeAt(0));
   const dy = Math.abs(Number(from[1]) - Number(to[1]));
   return (dx === 1 && dy === 2) || (dx === 2 && dy === 1);
@@ -37,7 +20,8 @@ function knightJumpVia(game, from, to) {
     const G = game && game.constructor;
     if (G && typeof G.isKnightJump === 'function') return !!G.isKnightJump(from, to);
     if (game && typeof game.isKnightJump === 'function') return !!game.isKnightJump(from, to);
-  } catch (_) { /* fall through to the local test */ }
+  } catch (_) {}
+
   return isKnightJump(from, to);
 }
 
@@ -54,7 +38,7 @@ function fenFullmove(fen) {
   return Number.isFinite(n) && n > 0 ? n : 1;
 }
 
-/** '3. Bb5' for a white move, 'Bb5' for a black move (or '3... Bb5' when force is set). */
+/** '3. Bb5' for a white move, 'Bb5' for a black move, '3... Bb5' when forced. */
 function numberedSan(parentFen, san, force) {
   const n = fenFullmove(parentFen);
   if (fenTurn(parentFen) === 'white') return `${n}. ${san}`;
@@ -67,6 +51,7 @@ function formatLine(parent, first, maxPlies) {
   let node = first;
   let count = 0;
   let force = true;
+
   while (node && node.san && count < maxPlies) {
     parts.push(numberedSan(prev.fen, node.san, force));
     force = false;
@@ -74,6 +59,7 @@ function formatLine(parent, first, maxPlies) {
     node = (node.children || [])[0];
     count += 1;
   }
+
   if (node && node.san) parts.push('...');
   return parts.join(' ');
 }
@@ -82,29 +68,36 @@ function safePath(game) {
   try {
     const p = game.path();
     if (Array.isArray(p) && p.length) return p;
-  } catch (_) { /* fall back to current */ }
+  } catch (_) {}
+
   return game && game.current ? [game.current] : [];
 }
 
-/** Numbered SAN of root->current; sibling variations of path nodes appear in parentheses at the branch point. */
+/** Numbered SAN of root to current, with sibling variations in parentheses at each branch point. */
 export function formatHistory(game, opts = {}) {
   const maxVar = Number.isFinite(opts.variationPlies) ? opts.variationPlies : MAX_VARIATION_PLIES;
   const path = safePath(game);
   if (path.length < 2) return '';
+
   const out = [];
   let force = true;
+
   for (let i = 1; i < path.length; i++) {
     const node = path[i];
     const parent = path[i - 1];
     if (!node || !node.san) continue;
+
     out.push(numberedSan(parent.fen, node.san, force));
     force = false;
+
     const siblings = (parent.children || []).filter(c => c && c.id !== node.id && c.san);
+
     for (const sib of siblings) {
       out.push('(' + formatLine(parent, sib, maxVar) + ')');
       force = true;
     }
   }
+
   return out.join(' ');
 }
 
@@ -113,10 +106,12 @@ function branchPoint(path) {
     const parent = path[i - 1];
     const node = path[i];
     const main = (parent.children || [])[0];
+
     if (!main || main.id !== node.id) {
       return { ply: node.ply, label: numberedSan(parent.fen, node.san, true) };
     }
   }
+
   return null;
 }
 
@@ -127,6 +122,7 @@ function statusText(st) {
   if (st.outcome === '1/2-1/2') return `draw (${st.reason || 'draw'})`;
   if (st.outcome) return `game over (${st.outcome}${st.reason ? ', ' + st.reason : ''})`;
   if (st.check) return 'check';
+
   const flags = [];
   if (Number(st.repetition) >= 2) flags.push(`repetition x${st.repetition}`);
   if (st.fiftyMoves) flags.push('fifty-move rule available');
@@ -134,71 +130,103 @@ function statusText(st) {
   return flags.length ? `playing (${flags.join(', ')})` : 'playing';
 }
 
-/** Unique SAN strings for every legal move in the current position (promotions appear once per piece). */
+/** Unique SAN for every legal move here; promotions appear once per piece. */
 export function legalSanList(game) {
   const seen = new Set();
   const out = [];
   let moves = [];
-  try { moves = game.legalMoves() || []; } catch (_) { moves = []; }
+
+  try {
+    moves = game.legalMoves() || [];
+  } catch (_) {
+    moves = [];
+  }
+
   for (const m of moves) {
     let san = null;
-    try { san = game.moveToSan(m); } catch (_) { san = null; }
-    if (san && !seen.has(san)) { seen.add(san); out.push(san); }
+
+    try {
+      san = game.moveToSan(m);
+    } catch (_) {
+      san = null;
+    }
+
+    if (san && !seen.has(san)) {
+      seen.add(san);
+      out.push(san);
+    }
   }
+
   return out;
 }
 
-/** Eval text from White's view: {cp:35} -> '+0.35', {cp:-120} -> '-1.20', {mate:3} -> '#3', {mate:-2} -> '-#2'. */
+/** White's view: '+0.35', '-1.20', '#3', '-#2', or '?'. */
 export function formatEval(score) {
   if (!score || typeof score !== 'object') return '?';
+
   if (typeof score.mate === 'number' && Number.isFinite(score.mate)) {
     return (score.mate < 0 ? '-#' : '#') + Math.abs(score.mate);
   }
+
   if (typeof score.cp === 'number' && Number.isFinite(score.cp)) {
     const v = score.cp / 100;
     if (v > 0) return '+' + v.toFixed(2);
     if (v < 0) return v.toFixed(2);
     return '0.00';
   }
+
   return '?';
 }
 
 function uciToSan(game, uci) {
   if (!uci) return null;
+
   try {
     const m = game.uciToMove(uci);
     return m ? game.moveToSan(m) : null;
-  } catch (_) { return null; }
+  } catch (_) {
+    return null;
+  }
 }
 
 function safePvToSan(game, pv) {
   if (!Array.isArray(pv) || !pv.length) return [];
-  try { return game.pvToSan(pv) || []; } catch (_) { return []; }
+
+  try {
+    return game.pvToSan(pv) || [];
+  } catch (_) {
+    return [];
+  }
 }
 
-// Engine lines belong to the position they were computed for; if the first PV move is not legal
-// here, the store still holds lines for a previous position and the section is omitted.
+// An illegal first PV move means the lines are still from a previous position.
 function engineIsCurrent(game, line) {
   const first = line && Array.isArray(line.pv) ? line.pv[0] : null;
   if (!first) return false;
+
   try {
     const m = game.uciToMove(first);
     if (!m) return false;
     return typeof game.isLegal === 'function' ? !!game.isLegal(m) : true;
-  } catch (_) { return false; }
+  } catch (_) {
+    return false;
+  }
 }
 
 function engineContext(state, game, node) {
   const eng = state.engine || {};
   const lines = Array.isArray(eng.lines) ? eng.lines.filter(l => l && Array.isArray(l.pv) && l.pv.length) : [];
+
   if (lines.length && engineIsCurrent(game, lines[0])) {
     const out = lines.map((l, i) => {
       const san = Array.isArray(l.san) && l.san.length ? l.san : safePvToSan(game, l.pv);
       return { n: l.multipv || i + 1, eval: formatEval(l.score), depth: l.depth || 0, san: san.slice(0, MAX_PV_PLIES).join(' ') };
     });
+
     const top = lines[0];
     const bestUci = eng.bestMove || top.pv[0];
     const best_san = uciToSan(game, bestUci) || (out[0].san.split(' ')[0] || null);
+
     return {
       source: 'live',
       depth: eng.depth || top.depth || 0,
@@ -207,10 +235,13 @@ function engineContext(state, game, node) {
       lines: out,
     };
   }
+
   const ev = node && node.eval;
+
   if (ev && (typeof ev.cp === 'number' || typeof ev.mate === 'number')) {
     const pvSan = Array.isArray(ev.pv) && ev.pv.length ? safePvToSan(game, ev.pv) : (ev.best ? [ev.best] : []);
     const evalText = formatEval(ev);
+
     return {
       source: 'stored',
       depth: ev.depth || 0,
@@ -219,12 +250,15 @@ function engineContext(state, game, node) {
       lines: pvSan.length ? [{ n: 1, eval: evalText, depth: ev.depth || 0, san: pvSan.slice(0, MAX_PV_PLIES).join(' ') }] : [],
     };
   }
+
   return null;
 }
 
 function normArrow(game, a) {
   if (!a || !isSquare(a.from) || !isSquare(a.to)) return null;
+
   const color = COLORS.includes(a.color) ? a.color : 'green';
+
   return {
     from: a.from,
     to: a.to,
@@ -239,7 +273,7 @@ function normHighlight(h) {
   return { square: h.square, color: COLORS.includes(h.color) ? h.color : 'green' };
 }
 
-/** Same content as the packet, as a plain object (window.chess.getState() and structured provider use). */
+/** The packet's content as a plain object. */
 export function buildContext(state, opts = {}) {
   const o = { includeEngine: true, includeLegalMoves: false, ...opts };
   const game = state.game;
@@ -247,10 +281,18 @@ export function buildContext(state, opts = {}) {
   const node = path[path.length - 1] || game.current;
   const fen = game.fen();
   const branch = branchPoint(path);
+
   let status;
-  try { status = statusText(game.status()); } catch (_) { status = 'playing'; }
+
+  try {
+    status = statusText(game.status());
+  } catch (_) {
+    status = 'playing';
+  }
+
   const last_move = node && node.san ? { san: node.san, uci: node.uci || null } : null;
   const study = state.study || {};
+
   return {
     variant: game.variant || 'standard',
     chess960: game.variant === 'chess960' ? (Number.isFinite(game.chess960Number) ? game.chess960Number : null) : null,
@@ -284,11 +326,12 @@ function arrowText(a) {
   return s;
 }
 
-/** The text packet an AI reads. opts = { includeEngine: true, includeLegalMoves: false }. */
+/** The text packet an AI reads. */
 export function buildPacket(state, opts = {}) {
   const o = { includeEngine: true, includeLegalMoves: false, ...opts };
   const c = buildContext(state, o);
   const L = [];
+
   L.push('== Chessboard ==');
   if (c.title) L.push('title: ' + c.title);
   if (c.mode === 'setup') L.push('mode: setup (the board shows an uncommitted setup; this packet describes the last committed game)');
@@ -296,11 +339,13 @@ export function buildPacket(state, opts = {}) {
   L.push('start_fen: ' + c.start_fen);
   L.push('fen: ' + c.fen);
   L.push('turn: ' + c.turn);
+
   const line = c.line === 'main' ? 'main' : `variation (branched at ${c.branched_at ? c.branched_at.label : '?'})`;
   L.push(`move_number: ${c.move_number}  ply: ${c.ply}  line: ${line}`);
   L.push('history: ' + (c.history_san || '(none)'));
   L.push('last_move: ' + (c.last_move ? `${c.last_move.san} (${c.last_move.uci || '?'})` : 'none'));
   L.push('status: ' + c.status);
+
   if (o.includeLegalMoves) L.push('legal_moves: ' + ((c.legal_moves || []).join(', ') || '(none)'));
   if (c.next_moves.length) L.push('next: ' + c.next_moves.join(', '));
   if (c.arrows.length) L.push('arrows: ' + c.arrows.map(arrowText).join(', '));
@@ -308,13 +353,16 @@ export function buildPacket(state, opts = {}) {
   if (c.note) L.push('note: ' + JSON.stringify(c.note));
   if (c.nag) L.push('nag: ' + c.nag);
   if (c.study_notes) L.push('study_notes: ' + JSON.stringify(c.study_notes));
+
   if (o.includeEngine && c.engine) {
     const e = c.engine;
     let head = `engine: depth ${e.depth}  eval ${e.eval} (White)`;
     if (e.best_san) head += `  best ${e.best_san}`;
     if (e.source === 'stored') head += '  [stored]';
     L.push(head);
+
     for (const ln of e.lines) L.push(`  ${ln.n}) ${ln.eval}  ${ln.san}`);
   }
+
   return L.join('\n');
 }

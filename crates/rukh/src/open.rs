@@ -1,39 +1,26 @@
-//! Opening the board once the server is up.
-//!
-//! By default the board opens in its own window: an installed Chromium-based browser started in
-//! app mode (no tabs, no address bar) with its own profile folder and the switch that puts it on
-//! the high-performance graphics card. On a machine with two graphics adapters, Chromium runs every
-//! page on the integrated one and ignores the page's own WebGL request for the faster adapter, so
-//! the switch has to be given to a browser process this program starts itself; a browser that is
-//! already running cannot take it. A separate profile folder makes that a new process even while
-//! the same browser is open with the person's own profile.
-//!
-//! Every decision here goes through [`System`], so tests use a fake that records what would be
-//! started and never touches the real environment, file system or processes.
+//! Opening the board once the server is up; see docs/program.md for the window.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The folder inside the data directory that holds the window's browser profile.
+/// Inside the data directory.
 pub const PROFILE_DIR: &str = "window-profile";
 
-/// Environment variable naming a browser executable to use for the window before any other.
+/// A browser executable tried for the window before any other.
 pub const BROWSER_ENV: &str = "RUKH_BROWSER";
 
-/// How the board is opened at start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenMode {
-    /// A Rukh window: a Chromium-based browser in app mode on the high-performance graphics card.
+    /// A Chromium-based browser in app mode on the high-performance graphics card.
     Window,
-    /// The default browser, in whatever window and on whatever graphics card it already uses.
+    /// The default browser.
     Browser,
-    /// Not opened; only the link is printed.
+    /// Only the link is printed.
     None,
 }
 
 impl OpenMode {
-    /// Reads the value of `--open`. The error text says which values are allowed.
     pub fn parse(value: &str) -> Result<OpenMode, String> {
         match value {
             "window" => Ok(OpenMode::Window),
@@ -46,7 +33,7 @@ impl OpenMode {
     }
 }
 
-/// The operating system family, which decides where browsers and the data directory live.
+/// Decides where browsers and the data directory live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     Windows,
@@ -55,8 +42,7 @@ pub enum Os {
 }
 
 impl Os {
-    /// The system this program was built for. Anything that is not Windows or macOS is treated
-    /// like Linux (PATH lookup, XDG folders).
+    /// Anything that is not Windows or macOS is treated like Linux.
     pub fn current() -> Os {
         if cfg!(windows) {
             Os::Windows
@@ -68,32 +54,30 @@ impl Os {
     }
 }
 
-/// What opening the board needs from the machine.
+/// What opening the board needs from the machine; tests use a fake.
 pub trait System {
-    /// The value of an environment variable, if it is set.
     fn env(&self, name: &str) -> Option<OsString>;
-    /// Whether a file that can be run exists at this path (on Unix: with an execute bit set).
+
+    /// On Unix: with an execute bit set.
     fn is_program(&self, path: &Path) -> bool;
-    /// The path made absolute against the current folder, so a browser started from elsewhere
-    /// finds the same folder.
+
     fn absolute(&self, path: &Path) -> io::Result<PathBuf>;
-    /// Creates a folder and any missing parents.
+
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
-    /// Starts a program detached from this one, with its output discarded, without waiting for it.
+
+    /// Output discarded, not waited for.
     fn spawn_detached(&self, program: &Path, args: &[OsString]) -> io::Result<()>;
-    /// Opens a link in the default browser.
+
     fn open_default(&self, link: &str) -> io::Result<()>;
 }
 
-/// A browser that can show the board in its own window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Browser {
     pub name: String,
     pub path: PathBuf,
 }
 
-/// The browsers looked for, in order, with the path of each one's executable relative to a base
-/// folder (a Windows install folder, or a macOS Applications folder).
+/// In search order: name, base folder variables, executable relative to the base.
 const WINDOWS_BROWSERS: &[(&str, &[&str], &str)] = &[
     (
         "Microsoft Edge",
@@ -139,35 +123,32 @@ const LINUX_BROWSERS: &[(&str, &str)] = &[
     ("Brave", "brave-browser"),
 ];
 
-/// The browsers searched for on this system, for the message when none is found.
 fn searched_names(os: Os) -> String {
     let mut names: Vec<&str> = match os {
         Os::Windows => WINDOWS_BROWSERS.iter().map(|b| b.0).collect(),
         Os::Mac => MAC_BROWSERS.iter().map(|b| b.0).collect(),
         Os::Linux => LINUX_BROWSERS.iter().map(|b| b.0).collect(),
     };
+
     names.dedup();
     names.join(", ")
 }
 
-/// A non-empty environment variable as a path.
 fn env_path(sys: &dyn System, name: &str) -> Option<PathBuf> {
     sys.env(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
 
-/// Joins a relative path written with forward slashes onto a base, one part at a time.
 fn join_rel(base: &Path, rel: &str) -> PathBuf {
     rel.split('/')
         .fold(base.to_path_buf(), |path, part| path.join(part))
 }
 
-/// Splits a PATH value with the separator of the given system (not the one this program was
-/// built for, so the tests can check every system from any machine). On Unix the value is split
-/// as raw bytes, so a folder whose name is not UTF-8 stays the same folder.
+/// Uses the given system's separator; on Unix splits raw bytes so non-UTF-8 folders survive.
 fn split_path_var(os: Os, value: &OsStr) -> Vec<PathBuf> {
     let separator = if os == Os::Windows { b';' } else { b':' };
+
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -178,6 +159,7 @@ fn split_path_var(os: Os, value: &OsStr) -> Vec<PathBuf> {
             .map(|part| PathBuf::from(OsStr::from_bytes(part)))
             .collect()
     }
+
     #[cfg(not(unix))]
     {
         value
@@ -189,20 +171,21 @@ fn split_path_var(os: Os, value: &OsStr) -> Vec<PathBuf> {
     }
 }
 
-/// The line to print when `RUKH_BROWSER` is set but does not name a program, so it is not used.
+/// The line to print when `RUKH_BROWSER` is set but does not name a program.
 pub fn ignored_browser_env(sys: &dyn System) -> Option<String> {
     let path = env_path(sys, BROWSER_ENV)?;
+
     if sys.is_program(&path) {
         return None;
     }
+
     Some(format!(
         "{BROWSER_ENV} is set to {}, which is not a program file, so it is not used.",
         path.display()
     ))
 }
 
-/// Finds a Chromium-based browser: `RUKH_BROWSER` first when it names a program file, then the
-/// usual install places for this system, taking the first that exists.
+/// `RUKH_BROWSER` first, then the usual install places for this system.
 pub fn find_browser(sys: &dyn System, os: Os) -> Option<Browser> {
     if let Some(path) = env_path(sys, BROWSER_ENV).filter(|p| sys.is_program(p)) {
         let name = path
@@ -211,6 +194,7 @@ pub fn find_browser(sys: &dyn System, os: Os) -> Option<Browser> {
             .unwrap_or_else(|| BROWSER_ENV.to_string());
         return Some(Browser { name, path });
     }
+
     match os {
         Os::Windows => WINDOWS_BROWSERS.iter().find_map(|(name, bases, rel)| {
             bases
@@ -228,6 +212,7 @@ pub fn find_browser(sys: &dyn System, os: Os) -> Option<Browser> {
             if let Some(home) = env_path(sys, "HOME") {
                 folders.push(home.join("Applications"));
             }
+
             MAC_BROWSERS.iter().find_map(|(name, rel)| {
                 folders
                     .iter()
@@ -244,6 +229,7 @@ pub fn find_browser(sys: &dyn System, os: Os) -> Option<Browser> {
                 .env("PATH")
                 .map(|value| split_path_var(os, &value))
                 .unwrap_or_default();
+
             LINUX_BROWSERS.iter().find_map(|(name, command)| {
                 dirs.iter()
                     .map(|dir| dir.join(command))
@@ -257,8 +243,7 @@ pub fn find_browser(sys: &dyn System, os: Os) -> Option<Browser> {
     }
 }
 
-/// Where the program keeps its files when `--data-dir` is not given, or None when the environment
-/// does not say (the variable it is built from is not set).
+/// None when the variable it is built from is not set.
 pub fn default_data_dir(sys: &dyn System, os: Os) -> Option<PathBuf> {
     match os {
         Os::Windows => env_path(sys, "LOCALAPPDATA").map(|dir| dir.join("Rukh")),
@@ -276,7 +261,6 @@ pub fn default_data_dir(sys: &dyn System, os: Os) -> Option<PathBuf> {
     }
 }
 
-/// The variable the default data directory is built from, for the message when it is missing.
 fn data_dir_source(os: Os) -> &'static str {
     match os {
         Os::Windows => "LOCALAPPDATA",
@@ -284,16 +268,15 @@ fn data_dir_source(os: Os) -> &'static str {
     }
 }
 
-/// The arguments the browser is started with for a Rukh window.
 pub fn window_args(link: &str, profile: &Path) -> Vec<OsString> {
     let mut user_data_dir = OsString::from("--user-data-dir=");
     user_data_dir.push(profile.as_os_str());
+
     vec![
         OsString::from(format!("--app={link}")),
         user_data_dir,
         OsString::from("--force-high-performance-gpu"),
-        // Keep the window plain: none of the person's browser extensions, no account sign-in
-        // and no syncing of their browser data into Rukh's own profile.
+        // No extensions, sign-in or sync of the person's browser data.
         OsString::from("--disable-extensions"),
         OsString::from("--disable-sync"),
         OsString::from("--disable-features=msImplicitSignin"),
@@ -303,18 +286,15 @@ pub fn window_args(link: &str, profile: &Path) -> Vec<OsString> {
     ]
 }
 
-/// How the board ended up being opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Opened {
-    /// In a Rukh window started from this browser.
+    /// The browser the window was started from.
     Window(String),
-    /// In the default browser.
     DefaultBrowser,
-    /// Not opened.
     Nowhere,
 }
 
-/// What happened, with the lines to print (a reason for any fallback, then how it was opened).
+/// `lines`: a reason for any fallback, then how it was opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
     pub opened: Opened,
@@ -324,7 +304,6 @@ pub struct Outcome {
 const NOT_OPENED: &str = "Not opened; open the link yourself.";
 const IN_DEFAULT: &str = "Opened in your default browser.";
 
-/// Opens the default browser, or says it could not.
 fn open_in_default(sys: &dyn System, link: &str, mut lines: Vec<String>) -> Outcome {
     match sys.open_default(link) {
         Ok(()) => {
@@ -359,6 +338,7 @@ fn open_window(
             searched_names(os)
         )
     })?;
+
     let data_dir = match data_dir {
         Some(dir) => dir.to_path_buf(),
         None => default_data_dir(sys, os).ok_or_else(|| {
@@ -368,14 +348,15 @@ fn open_window(
             )
         })?,
     };
-    // The browser resolves a relative profile path against its own working folder, so it gets an
-    // absolute one.
+
+    // The browser would resolve a relative path against its own working folder.
     let data_dir = sys.absolute(&data_dir).map_err(|e| {
         format!(
             "Could not tell where the data folder {} is ({e})",
             data_dir.display()
         )
     })?;
+
     let profile = data_dir.join(PROFILE_DIR);
     sys.create_dir_all(&profile).map_err(|e| {
         format!(
@@ -383,6 +364,7 @@ fn open_window(
             profile.display()
         )
     })?;
+
     sys.spawn_detached(&browser.path, &window_args(link, &profile))
         .map_err(|e| {
             format!(
@@ -391,11 +373,11 @@ fn open_window(
                 browser.path.display()
             )
         })?;
+
     Ok(browser.name)
 }
 
-/// Opens the board as asked. With `Window`, falls back to the default browser (saying why) when no
-/// suitable browser is found or it cannot be started.
+/// `Window` falls back to the default browser, saying why.
 pub fn open_board(
     sys: &dyn System,
     os: Os,
@@ -411,6 +393,7 @@ pub fn open_board(
         OpenMode::Browser => open_in_default(sys, link, Vec::new()),
         OpenMode::Window => {
             let mut lines: Vec<String> = ignored_browser_env(sys).into_iter().collect();
+
             match open_window(sys, os, link, data_dir) {
                 Ok(name) => {
                     lines.push(format!(
@@ -431,25 +414,23 @@ pub fn open_board(
     }
 }
 
-/// Stops this program's own standard handles from being inherited by a program it starts.
-/// Windows hands every inheritable handle to a child, not only the ones given as its stdio; when
-/// this program's output is a pipe, the browser would hold that pipe open until its window closes,
-/// and whatever reads the pipe would wait for it after this program has exited.
+/// Keeps a started browser from holding this program's output pipe open; see docs/program.md.
 #[cfg(windows)]
 fn stop_std_handle_inheritance() {
     use std::ffi::c_void;
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetStdHandle(which: u32) -> *mut c_void;
         fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
     }
+
     // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE (-10, -11, -12 as DWORD).
     const STD_HANDLES: [u32; 3] = [0xFFFF_FFF6, 0xFFFF_FFF5, 0xFFFF_FFF4];
     const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
     for which in STD_HANDLES {
-        // SAFETY: GetStdHandle takes any value and returns a handle, null or INVALID_HANDLE_VALUE;
-        // only a real handle is passed on, and SetHandleInformation only changes its inherit flag
-        // (a failure there leaves the handle as it was, which is harmless).
+        // SAFETY: only a real handle is passed on, and only its inherit flag changes.
         unsafe {
             let handle = GetStdHandle(which);
             if !handle.is_null() && handle as isize != -1 {
@@ -459,7 +440,6 @@ fn stop_std_handle_inheritance() {
     }
 }
 
-/// The real machine.
 pub struct RealSystem;
 
 impl System for RealSystem {
@@ -475,6 +455,7 @@ impl System for RealSystem {
                 .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         }
+
         #[cfg(not(unix))]
         {
             path.is_file()
@@ -491,30 +472,34 @@ impl System for RealSystem {
 
     fn spawn_detached(&self, program: &Path, args: &[OsString]) -> io::Result<()> {
         use std::process::{Command, Stdio};
+
         let mut command = Command::new(program);
         command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // No console of its own and not in this console's group, so Ctrl+C here leaves it be.
+            // Not in this console's group, so Ctrl+C here leaves it be.
             const DETACHED_PROCESS: u32 = 0x0000_0008;
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
             stop_std_handle_inheritance();
         }
+
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
             // Its own process group, so Ctrl+C in this terminal does not reach it.
             command.process_group(0);
         }
+
         let mut child = command.spawn()?;
-        // Collect its exit status in the background so it does not linger as a zombie; nothing
-        // waits on this thread.
+
+        // Reaps the child so it does not linger as a zombie.
         std::thread::spawn(move || {
             let _ = child.wait();
         });
@@ -532,15 +517,13 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
 
-    /// A machine made of a map of environment variables and a set of files. It records what would
-    /// be created or started instead of doing it.
+    /// Records what would be created or started instead of doing it.
     #[derive(Default)]
     struct Fake {
         env: HashMap<String, String>,
         files: HashSet<String>,
-        /// Files that exist but cannot be run (no execute bit).
+        /// Files with no execute bit.
         not_runnable: HashSet<String>,
-        /// The current folder relative paths are made absolute against.
         cwd: Option<String>,
         mkdir_fails: bool,
         spawn_fails: bool,
@@ -550,8 +533,7 @@ mod tests {
         opened_default: RefCell<Vec<String>>,
     }
 
-    /// Paths compared with forward slashes, so a fake Linux or macOS file system works the same
-    /// when the tests run on Windows.
+    /// Forward slashes, so fake Unix paths work when the tests run on Windows.
     fn norm(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }
@@ -561,10 +543,12 @@ mod tests {
             self.env.insert(name.to_string(), value.to_string());
             self
         }
+
         fn with_file(mut self, path: &str) -> Self {
             self.files.insert(path.to_string());
             self
         }
+
         fn with_plain_file(mut self, path: &str) -> Self {
             self.not_runnable.insert(path.to_string());
             self.with_file(path)
@@ -575,42 +559,51 @@ mod tests {
         fn env(&self, name: &str) -> Option<OsString> {
             self.env.get(name).map(OsString::from)
         }
+
         fn is_program(&self, path: &Path) -> bool {
             let path = norm(path);
             self.files.contains(&path) && !self.not_runnable.contains(&path)
         }
+
         fn absolute(&self, path: &Path) -> io::Result<PathBuf> {
-            // "/x" and "C:/x" both count as absolute here, so fake paths of every system work
-            // wherever the tests run.
+            // "/x" and "C:/x" both count as absolute on every host.
             let n = norm(path);
+
             if path.is_absolute() || n.starts_with('/') || n.get(1..3) == Some(":/") {
                 return Ok(path.to_path_buf());
             }
+
             match &self.cwd {
                 Some(cwd) => Ok(Path::new(cwd).join(path)),
                 None => Err(io::Error::other("no current folder")),
             }
         }
+
         fn create_dir_all(&self, path: &Path) -> io::Result<()> {
             if self.mkdir_fails {
                 return Err(io::Error::other("disk full"));
             }
+
             self.created.borrow_mut().push(path.to_path_buf());
             Ok(())
         }
+
         fn spawn_detached(&self, program: &Path, args: &[OsString]) -> io::Result<()> {
             if self.spawn_fails {
                 return Err(io::Error::other("access denied"));
             }
+
             self.spawned
                 .borrow_mut()
                 .push((program.to_path_buf(), args.to_vec()));
             Ok(())
         }
+
         fn open_default(&self, link: &str) -> io::Result<()> {
             if self.default_fails {
                 return Err(io::Error::other("no handler"));
             }
+
             self.opened_default.borrow_mut().push(link.to_string());
             Ok(())
         }
@@ -670,6 +663,7 @@ mod tests {
                 "C:/PF86/Microsoft/Edge/Application/msedge.exe".into()
             ))
         );
+
         let sys = windows().with_file("C:/PF/Microsoft/Edge/Application/msedge.exe");
         assert_eq!(
             found(&sys, Os::Windows).map(|b| b.1),
@@ -813,6 +807,7 @@ mod tests {
         let link = "http://127.0.0.1:47481/";
         let data = Path::new("C:/Scratch/data");
         let out = open_board(&sys, Os::Windows, OpenMode::Window, link, Some(data));
+
         assert_eq!(out.opened, Opened::Window("Microsoft Edge".into()));
         assert_eq!(
             out.lines,
@@ -822,8 +817,10 @@ mod tests {
                     .to_string()
             ]
         );
+
         let profile = data.join(PROFILE_DIR);
         assert_eq!(*sys.created.borrow(), vec![profile.clone()]);
+
         let spawned = sys.spawned.borrow();
         assert_eq!(spawned.len(), 1);
         assert_eq!(
@@ -838,6 +835,7 @@ mod tests {
     fn window_uses_the_default_data_dir_without_data_dir() {
         let sys = windows().with_file("C:/PF86/Microsoft/Edge/Application/msedge.exe");
         let out = open_board(&sys, Os::Windows, OpenMode::Window, "http://x/", None);
+
         assert_eq!(out.opened, Opened::Window("Microsoft Edge".into()));
         assert_eq!(
             *sys.created.borrow(),
@@ -855,6 +853,7 @@ mod tests {
             "http://x/",
             Some(Path::new("C:/Scratch/data")),
         );
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert_eq!(out.lines.len(), 2);
         assert!(out.lines[0].starts_with("No Chromium-based browser was found (looked for Microsoft Edge, Google Chrome, Brave, Vivaldi;"));
@@ -872,6 +871,7 @@ mod tests {
     fn falls_back_when_the_launch_fails() {
         let mut sys = windows().with_file("C:/PF/Microsoft/Edge/Application/msedge.exe");
         sys.spawn_fails = true;
+
         let out = open_board(
             &sys,
             Os::Windows,
@@ -879,6 +879,7 @@ mod tests {
             "http://x/",
             Some(Path::new("C:/Scratch/data")),
         );
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert!(out.lines[0].starts_with("Could not start Microsoft Edge at "));
         assert!(out.lines[0].contains("access denied"));
@@ -892,6 +893,7 @@ mod tests {
             .with_env("ProgramFiles", "C:/PF")
             .with_file("C:/PF/Microsoft/Edge/Application/msedge.exe");
         let out = open_board(&sys, Os::Windows, OpenMode::Window, "http://x/", None);
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert!(out.lines[0].contains("LOCALAPPDATA is not set"));
         assert!(sys.created.borrow().is_empty());
@@ -902,6 +904,7 @@ mod tests {
     fn default_browser_and_none() {
         let sys = windows().with_file("C:/PF/Microsoft/Edge/Application/msedge.exe");
         let out = open_board(&sys, Os::Windows, OpenMode::Browser, "http://x/", None);
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert_eq!(
             out.lines,
@@ -911,6 +914,7 @@ mod tests {
 
         let sys = windows().with_file("C:/PF/Microsoft/Edge/Application/msedge.exe");
         let out = open_board(&sys, Os::Windows, OpenMode::None, "http://x/", None);
+
         assert_eq!(out.opened, Opened::Nowhere);
         assert_eq!(
             out.lines,
@@ -925,6 +929,7 @@ mod tests {
 
         let mut sys = windows();
         sys.default_fails = true;
+
         let out = open_board(&sys, Os::Windows, OpenMode::Window, "http://x/", None);
         assert_eq!(out.opened, Opened::Nowhere);
         assert_eq!(out.lines.last().map(String::as_str), Some(NOT_OPENED));
@@ -961,6 +966,7 @@ mod tests {
                     .join("rukh")
             )
         );
+
         let sys = Fake::default()
             .with_env("HOME", "/home/someone")
             .with_env("XDG_DATA_HOME", "/data/xdg");
@@ -968,6 +974,7 @@ mod tests {
             default_data_dir(&sys, Os::Linux),
             Some(Path::new("/data/xdg").join("rukh"))
         );
+
         // A relative XDG_DATA_HOME is ignored, as the XDG rules say.
         let sys = Fake::default()
             .with_env("HOME", "/home/someone")
@@ -981,6 +988,7 @@ mod tests {
                     .join("rukh")
             )
         );
+
         assert_eq!(default_data_dir(&Fake::default(), Os::Linux), None);
     }
 
@@ -988,6 +996,7 @@ mod tests {
     fn a_relative_data_dir_is_made_absolute_for_the_browser() {
         let mut sys = windows().with_file("C:/PF86/Microsoft/Edge/Application/msedge.exe");
         sys.cwd = Some("C:/Work".to_string());
+
         let link = "http://127.0.0.1:47481/";
         let out = open_board(
             &sys,
@@ -996,9 +1005,12 @@ mod tests {
             link,
             Some(Path::new("d/e")),
         );
+
         assert_eq!(out.opened, Opened::Window("Microsoft Edge".into()));
+
         let profile = Path::new("C:/Work").join("d/e").join(PROFILE_DIR);
         assert_eq!(*sys.created.borrow(), vec![profile.clone()]);
+
         let spawned = sys.spawned.borrow();
         assert_eq!(spawned[0].1, window_args(link, &profile));
         assert_eq!(
@@ -1006,8 +1018,7 @@ mod tests {
             "--user-data-dir=C:/Work/d/e/window-profile"
         );
 
-        // When the current folder cannot be told, nothing is created and the default browser
-        // is used.
+        // Unknown current folder: nothing is created and the default browser is used.
         let sys = windows().with_file("C:/PF86/Microsoft/Edge/Application/msedge.exe");
         let out = open_board(
             &sys,
@@ -1016,6 +1027,7 @@ mod tests {
             link,
             Some(Path::new("d/e")),
         );
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert!(out.lines[0].starts_with("Could not tell where the data folder d/e is"));
         assert!(sys.created.borrow().is_empty());
@@ -1026,6 +1038,7 @@ mod tests {
     fn falls_back_when_the_profile_folder_cannot_be_created() {
         let mut sys = windows().with_file("C:/PF86/Microsoft/Edge/Application/msedge.exe");
         sys.mkdir_fails = true;
+
         let out = open_board(
             &sys,
             Os::Windows,
@@ -1033,6 +1046,7 @@ mod tests {
             "http://x/",
             Some(Path::new("C:/Scratch/data")),
         );
+
         assert_eq!(out.opened, Opened::DefaultBrowser);
         assert_eq!(out.lines.len(), 2);
         assert!(out.lines[0].starts_with("Could not create the window's profile folder "));
@@ -1050,6 +1064,7 @@ mod tests {
     fn window_arguments_keep_spaces_and_non_ascii_in_one_argument() {
         let profile = Path::new("C:/Users/First Last/Donn\u{e9}es de Rukh").join(PROFILE_DIR);
         let args = window_args("http://127.0.0.1:47474/", &profile);
+
         assert_eq!(args.len(), 9);
         assert_eq!(
             norm(Path::new(&args[1])),
@@ -1070,6 +1085,7 @@ mod tests {
             "http://x/",
             Some(Path::new("C:/Scratch/data")),
         );
+
         assert_eq!(out.opened, Opened::Window("Microsoft Edge".into()));
         assert_eq!(out.lines.len(), 2);
         assert_eq!(
@@ -1083,6 +1099,7 @@ mod tests {
         let sys = windows()
             .with_file("C:/PF86/Microsoft/Edge/Application/msedge.exe")
             .with_env(BROWSER_ENV, "");
+
         assert_eq!(ignored_browser_env(&sys), None);
         assert_eq!(
             found(&sys, Os::Windows).map(|b| b.0),
@@ -1092,6 +1109,7 @@ mod tests {
         // Only the window uses it, so only the window reports it.
         let sys = windows().with_env(BROWSER_ENV, "D:/Tools/missing.exe");
         let out = open_board(&sys, Os::Windows, OpenMode::None, "http://x/", None);
+
         assert_eq!(out.lines, vec![NOT_OPENED.to_string()]);
     }
 
@@ -1105,12 +1123,14 @@ mod tests {
             found(&sys, Os::Linux),
             Some(("Chromium".into(), "/usr/bin/chromium".into()))
         );
+
         // The same for RUKH_BROWSER.
         let sys = Fake::default()
             .with_env("PATH", "/usr/bin")
             .with_plain_file("/opt/notes.txt")
             .with_file("/usr/bin/chromium")
             .with_env(BROWSER_ENV, "/opt/notes.txt");
+
         assert_eq!(found(&sys, Os::Linux).map(|b| b.0), Some("Chromium".into()));
         assert!(ignored_browser_env(&sys).is_some());
     }
@@ -1131,6 +1151,7 @@ mod tests {
     #[test]
     fn path_folders_that_are_not_utf8_are_kept() {
         use std::os::unix::ffi::OsStrExt;
+
         let value = OsStr::from_bytes(b"/opt/\xffbin:/usr/bin");
         assert_eq!(
             split_path_var(Os::Linux, value),

@@ -1,12 +1,8 @@
-// ui/notesPanel.js — the Notes tab: study title, study notes, the current move's note (debounced
-// 200 ms, re-bound on game:change), NAG picker, annotation counts + "clear arrows/highlights".
-// Nothing beyond the contract.
-
 import { el, button, field, debounce, moveLabel } from './layout.js';
 
 const NAGS = ['!!', '!', '!?', '?!', '?', '??'];
 
-/** Mount the notes panel. Returns { el, update, dispose }. */
+/** Returns { el, update, dispose }. */
 export function createNotesPanel({ store, actions }) {
   const title = el('input', { type: 'text', class: 'inp', placeholder: 'Untitled study', title: 'Study title (goes into the YAML and PGN headers)' });
   const studyNotes = el('textarea', { class: 'inp', rows: 4, placeholder: 'Study-level notes: the plan, what you are testing, what the AI said…' });
@@ -16,19 +12,33 @@ export function createNotesPanel({ store, actions }) {
 
   const saveTitle = debounce(v => actions.setStudyTitle(v), 200);
   const saveStudy = debounce(v => actions.setStudyNotes(v), 200);
-  let boundId = null;
-  let pending = null;   // { id, text } while a note save is queued — the id is the node it was typed for
 
-  // Write a note to a node that may no longer be current (the engine/API can move under the typing):
-  // the same goto → setNote → goto dance ai/api.js noteAt uses, since core has no node-addressed action.
+  let boundId = null;
+  // { id, text } while a note save is queued; id is the node it was typed for.
+  let pending = null;
+
+  // Core has no node-addressed setNote, so goto, set, and go back.
   function writeNoteTo(nodeId, text) {
     const g = store.state.game;
     const target = nodeId && g.node ? g.node(nodeId) : null;
-    if (!target) { actions.toast('Position changed while typing — note not saved', 'error'); return; }
+
+    if (!target) {
+      actions.toast('Position changed while typing — note not saved', 'error');
+      return;
+    }
+
     const cur = g.current;
-    if (cur.id === target.id) { actions.setNote(text); return; }
+    if (cur.id === target.id) {
+      actions.setNote(text);
+      return;
+    }
+
     actions.goto(target.id);
-    try { actions.setNote(text); } finally { actions.goto(cur.id); }
+    try {
+      actions.setNote(text);
+    } finally {
+      actions.goto(cur.id);
+    }
   }
 
   const saveNote = debounce(() => {
@@ -36,7 +46,11 @@ export function createNotesPanel({ store, actions }) {
     pending = null;
     if (p) writeNoteTo(p.id, p.text);
   }, 200);
-  const queueNote = v => { pending = { id: boundId || store.state.game.current.id, text: v }; saveNote(); };
+
+  const queueNote = v => {
+    pending = { id: boundId || store.state.game.current.id, text: v };
+    saveNote();
+  };
 
   title.addEventListener('input', e => saveTitle(e.target.value));
   title.addEventListener('blur', () => saveTitle.flush());
@@ -47,11 +61,13 @@ export function createNotesPanel({ store, actions }) {
 
   const nagButtons = new Map();
   const nagPick = el('div', { class: 'nag-pick' });
+
   for (const n of NAGS) {
     const b = button(n, () => actions.setNag(store.state.game.current.nag === n ? '' : n), { title: nagTitle(n) });
     nagButtons.set(n, b);
     nagPick.appendChild(b);
   }
+
   nagPick.appendChild(button('clear', () => actions.setNag(''), { small: true, title: 'Remove the glyph' }));
 
   const clearAnn = button('Clear arrows & highlights', () => actions.clearAnnotations({ arrows: true, highlights: true }), { small: true, title: 'Remove every arrow and highlight on this position' });
@@ -67,32 +83,46 @@ export function createNotesPanel({ store, actions }) {
     return { '!!': 'Brilliant', '!': 'Good', '!?': 'Interesting', '?!': 'Dubious', '?': 'Mistake', '??': 'Blunder' }[n] || n;
   }
 
-  const syncIfIdle = (inp, v) => { if (document.activeElement !== inp) inp.value = v == null ? '' : String(v); };
+  const syncIfIdle = (inp, v) => {
+    if (document.activeElement !== inp) inp.value = v == null ? '' : String(v);
+  };
 
   function update() {
     const s = store.state;
     const g = s.game;
     const cur = g.current;
+
     syncIfIdle(title, s.study && s.study.title);
     syncIfIdle(studyNotes, s.study && s.study.notes);
+
     if (cur.id !== boundId) {
-      saveNote.flush();     // deliver whatever was typed to the node it was typed for, then rebind
+      // Deliver the typed note to the node it was typed for, then rebind.
+      saveNote.flush();
       boundId = cur.id;
       note.value = cur.note || '';
     } else {
       syncIfIdle(note, cur.note);
     }
+
     moveLbl.textContent = `Note on ${moveLabel(g, cur)}`;
     for (const [n, b] of nagButtons) b.setAttribute('aria-pressed', String(cur.nag === n));
+
     const a = (cur.arrows || []).length, h = (cur.highlights || []).length;
     annCount.textContent = a || h ? `${a} arrow${a === 1 ? '' : 's'} · ${h} highlight${h === 1 ? '' : 's'}` : 'none';
     clearAnn.disabled = !(a || h);
+
     const setup = s.mode === 'setup';
-    note.disabled = setup; nagPick.querySelectorAll('button').forEach(b => { b.disabled = setup; });
+    note.disabled = setup;
+    nagPick.querySelectorAll('button').forEach(b => { b.disabled = setup; });
   }
 
   return {
     el: root, update,
-    dispose() { saveTitle.flush(); saveStudy.flush(); saveNote.flush(); root.remove(); },
+    dispose() {
+      saveTitle.flush();
+      saveStudy.flush();
+      saveNote.flush();
+      root.remove();
+    },
   };
 }

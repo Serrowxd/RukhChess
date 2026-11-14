@@ -1,16 +1,4 @@
-//! The table: a [`Session`] plus the counters every reader uses, and the one place intents are
-//! applied and frames are produced.
-//!
-//! Counters:
-//! - `rev` goes up by one on every state change of any kind.
-//! - `board_rev` goes up only for a move, a new game, and notes, drawings or navigation made from a
-//!   view. Engine evaluations, seat and style changes and an AI's own annotations leave it alone.
-//! - `recent` keeps the last [`RECENT_MAX`] board changes with who made them. An AI's annotations
-//!   and navigation are listed there too (at the unchanged `board_rev`), so another reader can be
-//!   told about them while the AI that made them is not.
-//!
-//! Who made a change is the `by` string: `view:<k>` for a page, `ai:<name>` for an MCP client.
-//! Anything else (the program itself) is treated like neither.
+//! The table: a [`Session`] plus its counters, where intents are applied and frames produced.
 
 use std::collections::VecDeque;
 
@@ -23,13 +11,12 @@ use crate::{
     Arrow, Error, Eval, Game, Highlight, Node, NodeId, Snapshot, Status, DRAW_COLORS, NAG_GLYPHS,
 };
 
-/// How many board changes `recent` keeps.
 pub const RECENT_MAX: usize = 16;
-/// Most arrows one move can hold.
+
 pub const MAX_ARROWS: usize = 64;
-/// Most highlighted squares one move can hold.
+
 pub const MAX_HIGHLIGHTS: usize = 64;
-/// Longest note, in characters.
+
 pub const MAX_NOTE_CHARS: usize = 10_000;
 
 /// Who sent an intent, read from its `by` string.
@@ -74,33 +61,28 @@ pub struct Change {
     pub node: NodeId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub san: Option<String>,
-    /// The `rev` the change was made at. Not sent; used to tell changes apart that share a
-    /// `board_rev` (an AI's annotations do not bump it).
+    /// Not sent; tells apart changes that share a `board_rev`.
     #[serde(skip)]
     pub rev: u64,
-    /// True when the change moved `board_rev`. Not sent. Entries that did not (an AI's notes and
-    /// navigation) are dropped first when `recent` is full, so they cannot push a move out.
+    /// Not sent; entries that did not bump `board_rev` are dropped first when `recent` is full.
     #[serde(skip)]
     pub bumped: bool,
 }
 
-/// How many `board_rev` bumps are remembered with who made them, so a `wait(for: any_change)`
-/// can tell "someone else changed the board" even after `recent` has dropped the entry.
+/// How many board_rev bumps are remembered with who made them.
 const BUMP_LOG_MAX: usize = 256;
 
 /// What a `wait(for: any_change)` would report now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangeReport {
-    /// The entries of `recent` to report, oldest first.
+    /// Oldest first.
     pub changes: Vec<Change>,
-    /// True when the wait should end: something was listed, or a board change by someone else
-    /// happened after `since` even if `recent` no longer lists it.
+    /// True when the wait should end, even if `recent` no longer lists the change.
     pub wake: bool,
     /// True when some board changes after `since` are no longer listed.
     pub truncated: bool,
 }
 
-/// The result of a finished game, as a `wait` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ResultBody {
     pub outcome: &'static str,
@@ -110,26 +92,20 @@ pub struct ResultBody {
 /// What a successful [`Table::apply`] produced.
 #[derive(Debug, Clone)]
 pub struct Applied {
-    /// The full frame after the intent (the same text [`Table::frame`] returns).
+    /// The same text [`Table::frame`] returns.
     pub frame_json: String,
-    /// The intent's result, as JSON text.
     pub result_json: String,
-    /// The same result as a value.
     pub result: Value,
-    /// `rev` after the intent.
     pub rev: u64,
-    /// False when the intent was accepted but changed nothing (stepping back at the start, an
-    /// annotation identical to what is there). `rev` did not move then.
+    /// False when the intent was accepted but changed nothing; `rev` did not move then.
     pub changed: bool,
 }
 
-/// The `match` part of a frame.
 #[derive(Debug, Clone, Serialize)]
 pub struct MatchBody {
     pub active: bool,
     pub seats: Seats,
     pub tip: NodeId,
-    /// True when the match is active and the board shows the tip.
     pub live: bool,
     /// Computed, never stored. See [`Session::to_move`].
     pub to_move: Option<Seat>,
@@ -138,7 +114,6 @@ pub struct MatchBody {
     pub time_control: Option<()>,
 }
 
-/// The `state` part of a frame.
 #[derive(Debug, Clone, Serialize)]
 pub struct StateBody {
     pub game_id: u64,
@@ -170,7 +145,6 @@ struct FrameOut<'a> {
     state: StateBody,
 }
 
-/// `{san, uci}` of a move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LastMove {
     pub san: String,
@@ -180,14 +154,13 @@ pub struct LastMove {
 /// The game status as an AI reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StatusBody {
-    /// One sentence: `White to move.`, `Black to move, in check.`, `Game over: 1-0, checkmate.`
+    /// One sentence, such as `Black to move, in check.`
     pub text: String,
     pub outcome: Option<&'static str>,
     pub reason: &'static str,
     pub check: bool,
 }
 
-/// One step of the path from the start to the current move.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PathStep {
     pub node: NodeId,
@@ -203,21 +176,20 @@ pub struct PositionBody {
     pub turn: &'static str,
     pub ply: u32,
     pub move_number: u32,
-    /// The moves from the start to here, numbered: `1. e4 e5 2. Nf3`.
+    /// Numbered moves from the start: `1. e4 e5 2. Nf3`.
     pub line: String,
     pub last_move: Option<LastMove>,
     pub status: StatusBody,
-    /// Every legal move, in SAN.
+    /// In SAN.
     pub legal_moves: Vec<String>,
     /// Always `null` until clocks exist.
     pub clock: Option<()>,
     pub seats: Seats,
     pub to_move: Option<Seat>,
     pub your_seat: Option<Side>,
-    /// The node the match continues from, or `null` when no match is active.
+    /// `null` when no match is active.
     pub tip: Option<NodeId>,
-    /// True when a match is active and the board shows its tip. While false the person is
-    /// browsing, and an AI's move in the match is still played at `tip`, not at `node`.
+    /// While false the person is browsing, and an AI's match move is still played at `tip`.
     pub live: bool,
     pub style: StyleInfo,
     pub note: String,
@@ -232,7 +204,7 @@ pub struct PositionBody {
     pub views: u32,
 }
 
-/// The position body plus every node of the tree (`get_game` with `detail: "tree"`).
+/// `get_game` with `detail: "tree"`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TreeBody {
     #[serde(flatten)]
@@ -240,47 +212,40 @@ pub struct TreeBody {
     pub nodes: Vec<Node>,
 }
 
-/// What a `wait` is waiting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitFor {
-    /// The caller's turn on this side. Level-triggered.
+    /// Level-triggered.
     MyTurn(Side),
-    /// Any board change not made by the caller. `since` is a `board_rev` the caller has seen;
-    /// `None`, or a value above the current `board_rev`, means "from when the wait started".
+    /// `since` is a `board_rev` the caller has seen; `None` or a future value means "from now".
     AnyChange { since: Option<u64> },
 }
 
-/// A `wait` result: `your_turn`, `changed` or `game_over` with the position, or `timeout` as one
-/// line `{event, board_rev}`.
+/// A `wait` result: an event with the position, or `timeout` as `{event, board_rev}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct WaitEvent {
     pub event: &'static str,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub position: Option<PositionBody>,
-    /// For `for: any_change`: the changes that ended the wait, oldest first.
+    /// Oldest first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_last: Option<Vec<Change>>,
-    /// Present (true) when older changes after `since` are not listed in `since_last`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_last_truncated: Option<bool>,
-    /// On `game_over` for `for: my_turn`: the result at the tip of the match, which is where the
-    /// game ended even if the person is browsing elsewhere.
+    /// The result at the tip of the match, even if the person is browsing elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ResultBody>,
-    /// On `game_over` when the person ended the match rather than the game ending on the board:
-    /// `match_stop`, `new_game` or `seats` (the AI's seat was given to someone else).
+    /// `match_stop`, `new_game` or `seats` when the person ended the match.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped: Option<&'static str>,
     /// On `seat_changed`: the seat the person moved the AI to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat: Option<Side>,
-    /// Only on `timeout` (the position carries its own otherwise).
+    /// Only on `timeout`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub board_rev: Option<u64>,
 }
 
 impl WaitEvent {
-    /// `{"event":"timeout","board_rev":N}`.
     pub fn timeout(board_rev: u64) -> WaitEvent {
         WaitEvent {
             event: "timeout",
@@ -313,23 +278,20 @@ impl WaitEvent {
 pub struct Rejected {
     /// `arrow`, `highlight`, `nag` or `note`.
     pub item: &'static str,
-    /// The item as it was sent.
     pub value: Value,
     pub reason: String,
 }
 
-/// How much of an annotation landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct AppliedCounts {
-    /// Arrows added, replaced or removed.
+    /// Added, replaced or removed.
     pub arrows: usize,
-    /// Highlights added, replaced or removed.
+    /// Added, replaced or removed.
     pub highlights: usize,
     pub note: bool,
     pub nag: bool,
 }
 
-/// The fields of an annotation as sent.
 struct AnnotationInput<'a> {
     note: Option<&'a str>,
     nag: Option<&'a str>,
@@ -353,15 +315,10 @@ pub struct Table {
     recent: VecDeque<Change>,
     /// `(board_rev, by)` of the last [`BUMP_LOG_MAX`] changes that bumped `board_rev`.
     bumps: VecDeque<(u64, String)>,
-    /// Set when a view ended a match still in progress (`match_stop`, `new_game`, or `seats` when
-    /// the AI was taken out), cleared by the next `match_start` from a view. While set, an AI's
-    /// seat claim does not start a match, so the person's Stop sticks against an AI that keeps
-    /// calling `wait`.
+    /// While set, an AI's seat claim does not start a match, so the person's Stop sticks.
     stopped_by_person: Option<&'static str>,
-    /// The seat a view's `set_seats` just moved the AI to from the other colour.
     seat_moved_to: Option<Side>,
-    /// The status at the tip of the active match, kept up to date after every change so a waiting
-    /// AI can be told the game is over without the game being copied for each look.
+    /// Cached so a waiting AI can be told the game is over without copying the game.
     tip_status: Option<Status>,
     instance: String,
     hint: Hint,
@@ -378,13 +335,13 @@ fn square_ok(s: &str) -> bool {
     b.len() == 2 && (b'a'..=b'h').contains(&b[0]) && (b'1'..=b'8').contains(&b[1])
 }
 
-/// A drawing colour from an input field: missing or null is green; a known name (any case) is
-/// kept; anything else is an error text.
+/// Missing or null is green; a known name in any case is kept; anything else is an error.
 fn read_color(v: Option<&Value>) -> Result<String, String> {
     match v {
         None | Some(Value::Null) => Ok("green".to_string()),
         Some(Value::String(s)) => {
             let c = s.trim().to_ascii_lowercase();
+
             if DRAW_COLORS.contains(&c.as_str()) {
                 Ok(c)
             } else {
@@ -401,6 +358,7 @@ fn read_square(v: Option<&Value>, field: &str) -> Result<String, String> {
     match v {
         Some(Value::String(s)) => {
             let sq = s.trim().to_ascii_lowercase();
+
             if square_ok(&sq) {
                 Ok(sq)
             } else {
@@ -416,12 +374,15 @@ fn read_arrow(v: &Value, source: Option<&str>) -> Result<Arrow, String> {
     if !v.is_object() {
         return Err("an arrow is an object {from, to, color}".to_string());
     }
+
     let from = read_square(v.get("from"), "from")?;
     let to = read_square(v.get("to"), "to")?;
     if from == to {
         return Err("an arrow needs two different squares".to_string());
     }
+
     let color = read_color(v.get("color"))?;
+
     Ok(Arrow {
         knight: crate::is_knight_jump(&from, &to),
         from,
@@ -436,8 +397,10 @@ fn read_arrow_squares(v: &Value, source: Option<&str>) -> Result<Arrow, String> 
     if !v.is_object() {
         return Err("an arrow is an object {from, to, color}".to_string());
     }
+
     let from = read_square(v.get("from"), "from")?;
     let to = read_square(v.get("to"), "to")?;
+
     Ok(Arrow {
         knight: false,
         from,
@@ -452,7 +415,9 @@ fn read_highlight_square(v: &Value) -> Result<Highlight, String> {
     if !v.is_object() {
         return Err("a highlight is an object {square, color}".to_string());
     }
+
     let square = read_square(v.get("square"), "square")?;
+
     Ok(Highlight {
         square,
         color: "green".to_string(),
@@ -463,22 +428,26 @@ fn read_highlight(v: &Value) -> Result<Highlight, String> {
     if !v.is_object() {
         return Err("a highlight is an object {square, color}".to_string());
     }
+
     let square = read_square(v.get("square"), "square")?;
     let color = read_color(v.get("color"))?;
+
     Ok(Highlight { square, color })
 }
 
-/// A glyph from input: one of the six, or its PGN number `$1`..`$6`.
+/// One of the six glyphs, or its PGN number `$1`..`$6`.
 fn read_nag(text: &str) -> Result<String, String> {
     let t = text.trim();
     if NAG_GLYPHS.contains(&t) {
         return Ok(t.to_string());
     }
+
     if let Some(n) = t.strip_prefix('$').and_then(|n| n.parse::<usize>().ok()) {
         if (1..=NAG_GLYPHS.len()).contains(&n) {
             return Ok(NAG_GLYPHS[n - 1].to_string());
         }
     }
+
     Err(format!(
         "{t:?} is not a move glyph; use one of ! ? !! ?? !? ?!"
     ))
@@ -488,14 +457,17 @@ fn read_nag(text: &str) -> Result<String, String> {
 fn clean_move_text(text: &str) -> String {
     let t = text.trim();
     let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+
     let mut rest = t;
     if digits > 0 {
         let after = &t[digits..];
         let dots = after.bytes().take_while(|b| *b == b'.').count();
+
         if dots > 0 {
             rest = after[dots..].trim_start();
         }
     }
+
     let rest = rest.trim_end_matches(['!', '?']);
     if rest.is_empty() {
         t.to_string()
@@ -508,6 +480,7 @@ fn clean_move_text(text: &str) -> String {
 fn numbered(ply: u32, san: &str) -> String {
     let mover = ply.saturating_sub(1);
     let number = mover / 2 + 1;
+
     if mover.is_multiple_of(2) {
         format!("{number}. {san}")
     } else {
@@ -521,6 +494,7 @@ fn status_body(status: &Status, turn: Side) -> StatusBody {
         None if status.check => format!("{} to move, in check.", turn.title()),
         None => format!("{} to move.", turn.title()),
     };
+
     StatusBody {
         text,
         outcome: status.outcome,
@@ -538,8 +512,7 @@ fn annotations_of(node: &Node) -> (String, String, Vec<Arrow>, Vec<Highlight>) {
     )
 }
 
-/// Applies an annotation to one node of `game`. Nothing here fails as a whole except an unknown
-/// node; bad items are collected in `rejected`.
+/// Only an unknown node fails as a whole; bad items are collected in `rejected`.
 fn annotate_node(
     game: &mut Game,
     id: NodeId,
@@ -550,6 +523,7 @@ fn annotate_node(
     let node = game.node(id).ok_or(Error::UnknownNode(id))?;
     let before = annotations_of(node);
     let (mut note, mut nag, mut arrows, mut highlights) = before.clone();
+
     let mut applied = AppliedCounts::default();
     let mut rejected = Vec::new();
 
@@ -558,7 +532,6 @@ fn annotate_node(
         && input.arrows.is_none()
         && input.highlights.is_none();
 
-    // Note.
     match (mode, input.note) {
         (AnnotateMode::Clear, Some(_)) => {
             note.clear();
@@ -584,7 +557,6 @@ fn annotate_node(
         _ => {}
     }
 
-    // Glyph.
     match (mode, input.nag) {
         (AnnotateMode::Clear, Some(_)) => {
             nag.clear();
@@ -613,12 +585,12 @@ fn annotate_node(
         _ => {}
     }
 
-    // Arrows.
     if mode == AnnotateMode::Clear && nothing_given {
         applied.arrows += arrows.len();
         arrows.clear();
     } else if let Some(items) = input.arrows {
         let mut valid = Vec::new();
+
         for v in items {
             // A removal is matched by its squares alone, so its colour is not checked.
             let read = if mode == AnnotateMode::Clear {
@@ -626,6 +598,7 @@ fn annotate_node(
             } else {
                 read_arrow(v, source)
             };
+
             match read {
                 Ok(a) => valid.push((v, a)),
                 Err(reason) => rejected.push(Rejected {
@@ -635,6 +608,7 @@ fn annotate_node(
                 }),
             }
         }
+
         match mode {
             AnnotateMode::Clear if items.is_empty() => {
                 applied.arrows += arrows.len();
@@ -647,20 +621,20 @@ fn annotate_node(
                     applied.arrows += n - arrows.len();
                 }
             }
-            // Items were given but none could be read: keep what the move holds rather than
-            // wiping it over a typo. Only an empty list clears.
+            // Nothing readable: keep what the move holds rather than wiping it over a typo.
             AnnotateMode::Replace if valid.is_empty() && !items.is_empty() => {}
             AnnotateMode::Replace => {
                 let old_arrows = std::mem::take(&mut arrows);
+
                 for (v, mut a) in valid {
-                    // An arrow that is already there unchanged keeps who drew it, so a page that
-                    // sends the whole list back does not re-tag an AI's arrows as its own.
+                    // An unchanged arrow keeps who drew it when a page echoes the list back.
                     if let Some(old) = old_arrows
                         .iter()
                         .find(|x| x.from == a.from && x.to == a.to && x.color == a.color)
                     {
                         a.source.clone_from(&old.source);
                     }
+
                     if let Some(old) = arrows.iter_mut().find(|x| x.from == a.from && x.to == a.to)
                     {
                         *old = a;
@@ -674,8 +648,10 @@ fn annotate_node(
                         });
                         continue;
                     }
+
                     applied.arrows += 1;
                 }
+
                 if items.is_empty() {
                     applied.arrows += before.2.len();
                 }
@@ -695,24 +671,26 @@ fn annotate_node(
                         });
                         continue;
                     }
+
                     applied.arrows += 1;
                 }
             }
         }
     }
 
-    // Highlights.
     if mode == AnnotateMode::Clear && nothing_given {
         applied.highlights += highlights.len();
         highlights.clear();
     } else if let Some(items) = input.highlights {
         let mut valid = Vec::new();
+
         for v in items {
             let read = if mode == AnnotateMode::Clear {
                 read_highlight_square(v)
             } else {
                 read_highlight(v)
             };
+
             match read {
                 Ok(h) => valid.push((v, h)),
                 Err(reason) => rejected.push(Rejected {
@@ -722,6 +700,7 @@ fn annotate_node(
                 }),
             }
         }
+
         match mode {
             AnnotateMode::Clear if items.is_empty() => {
                 applied.highlights += highlights.len();
@@ -742,6 +721,7 @@ fn annotate_node(
                     }
                     highlights.clear();
                 }
+
                 for (v, h) in valid {
                     if let Some(old) = highlights.iter_mut().find(|x| x.square == h.square) {
                         *old = h;
@@ -757,6 +737,7 @@ fn annotate_node(
                         });
                         continue;
                     }
+
                     applied.highlights += 1;
                 }
             }
@@ -765,12 +746,14 @@ fn annotate_node(
 
     let after = (note, nag, arrows, highlights);
     let changed = after != before;
+
     if changed {
         game.set_note(id, &after.0)?;
         game.set_nag(id, &after.1)?;
         game.set_arrows(id, &after.2)?;
         game.set_highlights(id, &after.3)?;
     }
+
     Ok(AnnotationOutcome {
         applied,
         rejected,
@@ -779,12 +762,11 @@ fn annotate_node(
 }
 
 impl Table {
-    /// A table on the classical start position. `instance` identifies this program start in frames.
+    /// `instance` identifies this program start in frames.
     pub fn new(instance: &str) -> Table {
         Table::with_session(instance, Session::default())
     }
 
-    /// A table on an existing session, counters at their start values.
     pub fn with_session(instance: &str, session: Session) -> Table {
         let mut table = Table {
             session,
@@ -803,12 +785,14 @@ impl Table {
                 intent_id: None,
             },
         };
+
         table.refresh_tip_status();
         table
     }
 
     fn refresh_tip_status(&mut self) {
         let m = &self.session.play;
+
         self.tip_status = if m.active {
             self.session.status_at(m.tip)
         } else {
@@ -833,6 +817,7 @@ impl Table {
     /// The seat a view just moved the AI to from the other colour, while that move stands.
     pub fn seat_moved_to(&self) -> Option<Side> {
         let seats = self.session.play.seats;
+
         self.seat_moved_to.filter(|to| {
             self.session.play.active
                 && seats.get(*to) == Seat::Ai
@@ -847,8 +832,6 @@ impl Table {
     pub fn instance(&self) -> &str {
         &self.instance
     }
-
-    // ------------------------------------------------------------------ reading
 
     pub fn session(&self) -> &Session {
         &self.session
@@ -874,7 +857,7 @@ impl Table {
         self.game_id
     }
 
-    /// The last board changes, oldest first.
+    /// Oldest first.
     pub fn recent(&self) -> &VecDeque<Change> {
         &self.recent
     }
@@ -887,7 +870,6 @@ impl Table {
         self.session.to_move()
     }
 
-    /// True when an AI holding `side` should move now: `to_move` is `ai` and `side` is to move.
     pub fn is_ai_turn(&self, side: Side) -> bool {
         self.session.is_ai_turn(side)
     }
@@ -901,18 +883,15 @@ impl Table {
             .collect()
     }
 
-    /// The changes that end a `wait(for: any_change)` for `by`: changes not made by `by` that
-    /// are newer than `since` (when given and not above the current `board_rev`), or were made
-    /// after `start_rev` (the `rev` when the wait started). Oldest first.
+    /// The changes that end a `wait(for: any_change)` for `by`, oldest first.
     pub fn changes_for(&self, by: &str, since: Option<u64>, start_rev: u64) -> Vec<Change> {
         self.change_report(by, since, start_rev).changes
     }
 
-    /// The full answer for a `wait(for: any_change)`: what to list, whether to wake, and whether
-    /// the list is missing older changes. Decided from the bump log as well as `recent`, so a
-    /// change by someone else is never skipped just because `recent` has dropped it.
+    /// The full answer for a `wait(for: any_change)`, from the bump log as well as `recent`.
     pub fn change_report(&self, by: &str, since: Option<u64>, start_rev: u64) -> ChangeReport {
         let since = since.filter(|s| *s <= self.board_rev);
+
         let changes: Vec<Change> = self
             .recent
             .iter()
@@ -920,27 +899,33 @@ impl Table {
             .filter(|c| since.is_some_and(|s| c.board_rev > s) || c.rev > start_rev)
             .cloned()
             .collect();
+
         let mut wake = !changes.is_empty();
         let mut truncated = false;
+
         if let Some(s) = since {
             if s < self.board_rev {
                 // The log holds the bumps board_rev - len + 1 ..= board_rev, one per value.
                 let covered = s >= self.board_rev.saturating_sub(self.bumps.len() as u64);
+
                 let others = self
                     .bumps
                     .iter()
                     .filter(|(rev, who)| *rev > s && who != by)
                     .count();
+
                 let listed = changes
                     .iter()
                     .filter(|c| c.bumped && c.board_rev > s)
                     .count();
+
                 if !covered || others > 0 {
                     wake = true;
                 }
                 truncated = !covered || listed < others;
             }
         }
+
         ChangeReport {
             changes,
             wake,
@@ -948,9 +933,9 @@ impl Table {
         }
     }
 
-    /// The `match` body of a frame.
     pub fn match_body(&self) -> MatchBody {
         let m = &self.session.play;
+
         MatchBody {
             active: m.active,
             seats: m.seats,
@@ -962,7 +947,6 @@ impl Table {
         }
     }
 
-    /// The `state` body of a frame.
     pub fn state(&self) -> StateBody {
         StateBody {
             game_id: self.game_id,
@@ -975,8 +959,7 @@ impl Table {
         }
     }
 
-    /// The full frame sent to views:
-    /// `{"t":"state","instance","rev","now_ms","hint":{reason,by,intent_id?},"state":{...}}`.
+    /// The full `{"t":"state",...}` frame sent to views.
     pub fn frame(&self, now_ms: u64) -> String {
         let out = FrameOut {
             t: "state",
@@ -986,20 +969,20 @@ impl Table {
             hint: &self.hint,
             state: self.state(),
         };
-        // The frame holds only strings, numbers and lists, so encoding cannot fail in practice.
-        // If it ever did, views get a readable error message instead of a broken frame.
+
+        // Cannot fail in practice; if it did, views get a readable error instead of a broken frame.
         serde_json::to_string(&out).unwrap_or_else(|e| {
             json!({"t": "error", "message": format!("could not encode the game state: {e}")})
                 .to_string()
         })
     }
 
-    /// The position body for an AI holding `your_seat` (or none), with `views` open boards.
     pub fn position(&self, your_seat: Option<Side>, views: u32) -> PositionBody {
         let game = &self.session.game;
         let play = &self.session.play;
         let node = game.current_node();
         let turn = Side::to_move_in(&node.fen);
+
         let path: Vec<PathStep> = game
             .path()
             .iter()
@@ -1012,15 +995,18 @@ impl Table {
                 })
             })
             .collect();
+
         let mut line = Vec::new();
         for (i, step) in path.iter().enumerate() {
             let white_moved = step.ply.saturating_sub(1).is_multiple_of(2);
+
             if white_moved || i == 0 {
                 line.push(numbered(step.ply, &step.san));
             } else {
                 line.push(step.san.clone());
             }
         }
+
         let last_move = match (&node.san, &node.uci) {
             (Some(san), Some(uci)) => Some(LastMove {
                 san: san.clone(),
@@ -1028,6 +1014,7 @@ impl Table {
             }),
             _ => None,
         };
+
         PositionBody {
             node: node.id,
             fen: node.fen.clone(),
@@ -1056,7 +1043,6 @@ impl Table {
         }
     }
 
-    /// The position body plus every node.
     pub fn tree(&self, your_seat: Option<Side>, views: u32) -> TreeBody {
         TreeBody {
             position: self.position(your_seat, views),
@@ -1064,8 +1050,7 @@ impl Table {
         }
     }
 
-    /// Decides a `wait` from the current state alone. `None` means keep waiting. `start_rev` is
-    /// the `rev` when the wait started (used only for `AnyChange`).
+    /// Decides a `wait` from the current state alone. `None` means keep waiting.
     pub fn wait_event(
         &self,
         by: &str,
@@ -1076,8 +1061,7 @@ impl Table {
         self.wait_event_seated(by, what, start_rev, views, None)
     }
 
-    /// As [`Table::wait_event`], with `your_seat` for an `AnyChange` body: the seat the caller
-    /// holds, if any (`MyTurn` always reports the side it waits on).
+    /// As [`Table::wait_event`], with the caller's seat for an `AnyChange` body.
     pub fn wait_event_seated(
         &self,
         by: &str,
@@ -1090,11 +1074,13 @@ impl Table {
             WaitFor::MyTurn(side) => {
                 let play = &self.session.play;
                 let seated = play.active && play.seats.get(side) == Seat::Ai;
+
                 if !play.active {
                     let mut ev = WaitEvent::with_position("game_over", self.position(None, views));
                     ev.stopped = self.stopped_by_person;
                     return Some(ev);
                 }
+
                 if let Some(result) = self.tip_result() {
                     let mut ev = WaitEvent::with_position(
                         "game_over",
@@ -1103,6 +1089,7 @@ impl Table {
                     ev.result = Some(result);
                     return Some(ev);
                 }
+
                 if !seated {
                     if let Some(to) = self.seat_moved_to().filter(|to| *to == side.other()) {
                         let mut ev = WaitEvent::with_position(
@@ -1112,13 +1099,16 @@ impl Table {
                         ev.seat = Some(to);
                         return Some(ev);
                     }
+
                     let mut ev = WaitEvent::with_position("game_over", self.position(None, views));
                     ev.stopped = Some("seats");
                     return Some(ev);
                 }
+
                 if !self.is_ai_turn(side) {
                     return None;
                 }
+
                 Some(WaitEvent::with_position(
                     "your_turn",
                     self.position(Some(side), views),
@@ -1129,20 +1119,21 @@ impl Table {
                 if !report.wake {
                     return None;
                 }
+
                 let event = if self.session.game.status().outcome.is_some() {
                     "game_over"
                 } else {
                     "changed"
                 };
+
                 let mut ev = WaitEvent::with_position(event, self.position(your_seat, views));
                 ev.since_last = Some(report.changes);
                 ev.since_last_truncated = report.truncated.then_some(true);
+
                 Some(ev)
             }
         }
     }
-
-    // ------------------------------------------------------------------ changing
 
     /// Applies one intent (JSON text tagged by `op`) on behalf of `by`.
     pub fn apply(&mut self, by: &str, intent_json: &str, now_ms: u64) -> Result<Applied, Error> {
@@ -1170,6 +1161,7 @@ impl Table {
         intent_id: Option<u64>,
     ) -> Result<Applied, Error> {
         let actor = Actor::of(by);
+
         let (result, change) = match intent {
             Intent::Play {
                 mv,
@@ -1228,9 +1220,12 @@ impl Table {
                     .ok_or(Error::UnknownNode(node))?
                     .eval
                     .clone();
+
                 self.session.game.set_eval(node, eval)?;
+
                 let after = self.session.game.node(node).and_then(|n| n.eval.clone());
                 let changed = before != after;
+
                 (
                     json!({"node": node}),
                     changed.then_some(Pending::state("eval")),
@@ -1239,11 +1234,14 @@ impl Table {
             Intent::NewGame { fen, chess960 } => {
                 let was_active = self.session.play.active;
                 let in_progress = self.match_in_progress();
+
                 let out = self.new_game(fen.as_deref(), chess960)?;
+
                 if was_active && actor == Actor::View {
                     self.stopped_by_person = in_progress.then_some("new_game");
                 }
                 self.seat_moved_to = None;
+
                 out
             }
             Intent::MatchStart { seats, style } => {
@@ -1251,6 +1249,7 @@ impl Table {
                     self.stopped_by_person = None;
                 }
                 self.seat_moved_to = None;
+
                 let before = self.session.play;
                 let m = &mut self.session.play;
                 m.active = true;
@@ -1259,6 +1258,7 @@ impl Table {
                 if let Some(style) = style {
                     m.style = Style::normalize(&style);
                 }
+
                 let changed = before != self.session.play;
                 (
                     json!({"match": self.match_body()}),
@@ -1268,11 +1268,13 @@ impl Table {
             Intent::MatchStop => {
                 let changed = self.session.play.active;
                 let in_progress = self.match_in_progress();
+
                 self.session.play.active = false;
                 if changed && actor == Actor::View {
                     self.stopped_by_person = in_progress.then_some("match_stop");
                 }
                 self.seat_moved_to = None;
+
                 (
                     json!({"match": self.match_body()}),
                     changed.then_some(Pending::state("match")),
@@ -1281,21 +1283,26 @@ impl Table {
             Intent::SetSeats(seats) => {
                 let before = self.session.play.seats;
                 let changed = before != seats;
+
                 if changed && actor == Actor::View {
                     let ai_only = |s: &Seats, side: Side| {
                         s.get(side) == Seat::Ai && s.get(side.other()) != Seat::Ai
                     };
+
                     let moved_to = [Side::White, Side::Black]
                         .into_iter()
                         .find(|to| ai_only(&before, to.other()) && ai_only(&seats, *to));
+
                     let removed = [Side::White, Side::Black]
                         .into_iter()
                         .any(|side| before.get(side) == Seat::Ai && seats.get(side) != Seat::Ai);
+
                     if moved_to.is_none() && removed && self.match_in_progress() {
                         self.stopped_by_person = Some("seats");
                     }
                     self.seat_moved_to = moved_to;
                 }
+
                 self.session.play.seats = seats;
                 (
                     json!({"match": self.match_body()}),
@@ -1305,6 +1312,7 @@ impl Table {
             Intent::SetStyle { style } => {
                 let style = Style::normalize(&style);
                 let changed = self.session.play.style != style;
+
                 self.session.play.style = style;
                 (
                     json!({"style": style.info(), "match": self.match_body()}),
@@ -1317,13 +1325,16 @@ impl Table {
         let changed = change.is_some();
         if let Some(pending) = change {
             self.rev += 1;
+
             if pending.bump_board {
                 self.board_rev += 1;
                 self.bumps.push_back((self.board_rev, by.to_string()));
+
                 while self.bumps.len() > BUMP_LOG_MAX {
                     self.bumps.pop_front();
                 }
             }
+
             if let Some((node, san)) = pending.record {
                 self.recent.push_back(Change {
                     board_rev: self.board_rev,
@@ -1334,9 +1345,9 @@ impl Table {
                     rev: self.rev,
                     bumped: pending.bump_board,
                 });
+
                 while self.recent.len() > RECENT_MAX {
-                    // Drop the oldest entry that did not move board_rev first, so a run of an
-                    // AI's own notes never pushes the person's moves out.
+                    // Non-bumping entries go first, so an AI's notes never push a move out.
                     match self.recent.iter().position(|c| !c.bumped) {
                         Some(i) => {
                             self.recent.remove(i);
@@ -1347,6 +1358,7 @@ impl Table {
                     }
                 }
             }
+
             self.refresh_tip_status();
             self.hint = Hint {
                 reason: pending.reason,
@@ -1354,6 +1366,7 @@ impl Table {
                 intent_id,
             };
         }
+
         // Results that report board_rev get the value after the change.
         let mut result = result;
         if let Some(obj) = result.as_object_mut() {
@@ -1361,6 +1374,7 @@ impl Table {
                 obj.insert("board_rev".into(), json!(self.board_rev));
             }
         }
+
         Ok(Applied {
             frame_json: self.frame(now_ms),
             result_json: result.to_string(),
@@ -1395,6 +1409,7 @@ impl Table {
                 )));
             }
         }
+
         let stale = from_node.filter(|given| *given != from).map(|given| {
             let after = s
                 .game
@@ -1402,14 +1417,17 @@ impl Table {
                 .and_then(|n| n.san.as_ref().map(|san| numbered(n.ply, san)))
                 .map(|m| format!("after {m}"))
                 .unwrap_or_else(|| "the start position".to_string());
+
             format!(
                 "The board has moved on: the move would be played from node {from} ({after}), \
                  not node {given}."
             )
         });
+
         if in_match {
             let side = s.turn_at_tip();
             let seat = s.play.seats.get(side);
+
             if seat != Seat::Ai {
                 let who = match seat {
                     Seat::Human => "the person",
@@ -1417,6 +1435,7 @@ impl Table {
                     Seat::Ai => "an AI",
                 };
                 let moved_on = stale.map(|t| format!(" {t}")).unwrap_or_default();
+
                 return Err(Error::NotYourTurn(format!(
                     "It is not your turn: {} is to move and {} plays {}.{moved_on} Call wait and \
                      play when it returns your_turn.",
@@ -1426,6 +1445,7 @@ impl Table {
                 )));
             }
         }
+
         if let Some(text) = stale {
             return Err(Error::Stale(format!(
                 "{text} Read the position again and choose a move from there."
@@ -1436,12 +1456,14 @@ impl Table {
         if from != back_to {
             s.game.goto(from)?;
         }
+
         let cleaned = clean_move_text(text);
         let played = match s.game.play(&cleaned) {
             Ok(p) => p,
             Err(_) => {
                 let legal: Vec<String> = s.game.legal_moves().into_iter().map(|m| m.san).collect();
                 let shown: String = text.trim().chars().take(40).collect();
+
                 let message = format!(
                     "{} is not a legal move here. {} is to move. Legal moves: {}.",
                     if shown.is_empty() {
@@ -1452,14 +1474,16 @@ impl Table {
                     Side::to_move_in(s.game.fen()).title(),
                     legal.join(", ")
                 );
-                // Put the board back where it was before the attempt.
+
                 let _ = s.game.goto(back_to);
                 return Err(Error::IllegalMove(message));
             }
         };
+
         if s.play.active && from == s.play.tip {
             s.play.tip = played.node;
         }
+
         let outcome = annotate_node(
             &mut s.game,
             played.node,
@@ -1467,8 +1491,10 @@ impl Table {
             input,
             actor.arrow_source(),
         )?;
+
         let turn = Side::to_move_in(&played.fen);
         let status = status_body(&s.game.status(), turn);
+
         let result = json!({
             "node": played.node,
             "san": played.san,
@@ -1481,6 +1507,7 @@ impl Table {
             "rejected": outcome.rejected,
             "board_rev": 0,
         });
+
         Ok((
             result,
             Some(Pending::board(
@@ -1499,6 +1526,7 @@ impl Table {
     ) -> Result<(Value, Option<Pending>), Error> {
         let before = self.session.game.current();
         step(&mut self.session.game)?;
+
         let game = &self.session.game;
         let node = game.current_node();
         let result = json!({
@@ -1508,14 +1536,17 @@ impl Table {
             "ply": node.ply,
             "live": self.session.live(),
         });
+
         if node.id == before {
             return Ok((result, None));
         }
+
         let pending = match actor {
             Actor::View => Pending::board("navigate", true, node.id, node.san.clone()),
             Actor::Ai => Pending::board("navigate", false, node.id, node.san.clone()),
             Actor::Other => Pending::state("navigate"),
         };
+
         Ok((result, Some(pending)))
     }
 
@@ -1527,6 +1558,7 @@ impl Table {
         input: &AnnotationInput<'_>,
     ) -> Result<(Value, Option<Pending>), Error> {
         let id = node.unwrap_or_else(|| self.session.game.current());
+
         let outcome = annotate_node(
             &mut self.session.game,
             id,
@@ -1534,20 +1566,24 @@ impl Table {
             input,
             actor.arrow_source(),
         )?;
+
         let result = json!({
             "node": id,
             "applied": outcome.applied,
             "rejected": outcome.rejected,
             "board_rev": 0,
         });
+
         if !outcome.changed {
             return Ok((result, None));
         }
+
         let pending = match actor {
             Actor::View => Pending::board("annotate", true, id, None),
             Actor::Ai => Pending::board("annotate", false, id, None),
             Actor::Other => Pending::state("annotate"),
         };
+
         Ok((result, Some(pending)))
     }
 
@@ -1566,10 +1602,12 @@ impl Table {
             (None, Some(n)) => Game::chess960(n)?,
             (None, None) => Game::standard(),
         };
+
         self.session.game = game;
         self.session.play.active = false;
         self.session.play.tip = 0;
         self.game_id += 1;
+
         let g = &self.session.game;
         let result = json!({
             "node": 0,
@@ -1579,6 +1617,7 @@ impl Table {
             "chess960_number": g.chess960_number(),
             "game_id": self.game_id,
         });
+
         Ok((result, Some(Pending::board("new_game", true, 0, None))))
     }
 
@@ -1589,9 +1628,11 @@ impl Table {
                     .into(),
             ));
         }
+
         let stopped = self.stopped_by_person;
         let moved_away = self.seat_moved_to() == Some(seat.other());
         let m = &mut self.session.play;
+
         let (claimed, started) = if moved_away {
             // The wait that follows reports the new seat.
             (false, false)
@@ -1602,6 +1643,7 @@ impl Table {
                 } else {
                     "The person stopped the match on the board"
                 };
+
                 return Err(Error::BadInput(format!(
                     "{what}, so wait does not start another one. Stop and tell them. If they want \
                      to play again, ask them to press Start on the board with Opponent: AI, then \
@@ -1609,10 +1651,12 @@ impl Table {
                     seat.name()
                 )));
             }
+
             m.seats.set(seat, Seat::Ai);
             m.seats.set(seat.other(), Seat::Human);
             m.active = true;
             m.tip = self.session.game.current();
+
             (true, true)
         } else {
             match (m.seats.get(seat), m.seats.get(seat.other())) {
@@ -1634,8 +1678,7 @@ impl Table {
                     )))
                 }
                 (Seat::Human, _) => {
-                    // The person set this seat for a person in the running match (Start with
-                    // Opponent: Nobody, or a seat change); an AI does not take it over.
+                    // The person chose a human for this seat; an AI does not take it over.
                     return Err(Error::BadInput(format!(
                         "In this match the person has {} played by a person, not by an AI. Stop \
                          and tell them; if they want you to play, ask them to set Opponent: AI on \
@@ -1646,12 +1689,14 @@ impl Table {
                 }
             }
         };
+
         let result = json!({
             "seat": seat,
             "claimed": claimed,
             "started": started,
             "match": self.match_body(),
         });
+
         Ok((result, claimed.then_some(Pending::state("seats"))))
     }
 }
@@ -1665,7 +1710,7 @@ struct Pending {
 }
 
 impl Pending {
-    /// A change to state only: `rev` moves, nothing is listed.
+    /// `rev` moves, nothing is listed.
     fn state(reason: &'static str) -> Pending {
         Pending {
             reason,
@@ -1674,7 +1719,7 @@ impl Pending {
         }
     }
 
-    /// A board change listed in `recent`; `bump_board` says whether `board_rev` moves.
+    /// Listed in `recent`; `bump_board` says whether `board_rev` moves.
     fn board(reason: &'static str, bump_board: bool, node: NodeId, san: Option<String>) -> Pending {
         Pending {
             reason,

@@ -1,7 +1,4 @@
 //! Rukh: one chess game, shown by a 3D board in the browser and playable by any AI over MCP.
-//!
-//! This program owns the game. Board pages connect to it over a WebSocket; AI clients connect to
-//! `/mcp` on the same port. Everything listens on 127.0.0.1 only.
 
 mod cli;
 mod http;
@@ -28,10 +25,9 @@ use crate::cli::Command;
 use crate::http::AppState;
 use crate::hub::Hub;
 
-/// How long open connections get to finish after Ctrl+C before the program exits anyway.
+/// Time open connections get to finish after Ctrl+C.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-/// A server that is accepting connections.
 pub struct Running {
     pub port: u16,
     pub hub: Arc<Hub>,
@@ -40,19 +36,19 @@ pub struct Running {
 }
 
 impl Running {
-    /// Asks every connection to close and waits (up to a short grace period) for the server to end.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
+
         let task = self.task;
         let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
     }
 }
 
-/// Serves Rukh on an already bound listener.
 pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running> {
     let port = listener.local_addr()?.port();
     let hub = Arc::new(Hub::new(hub::new_instance_id()));
     let (stop, stopped) = watch::channel(false);
+
     let state = Arc::new(AppState {
         hub: hub.clone(),
         port,
@@ -60,12 +56,15 @@ pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running
         next_view: AtomicU64::new(0),
         shutdown: stopped.clone(),
     });
+
     let (mcp_service, end_mcp_sessions) = mcp::service(hub.clone(), port);
     let app = http::router(state, mcp_service);
+
     tokio::spawn(presence::run_ticker(
         hub.presence().clone(),
         stopped.clone(),
     ));
+
     let mut on_stop = stopped;
     let task = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -75,6 +74,7 @@ pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running
             })
             .await
     });
+
     Ok(Running {
         port,
         hub,
@@ -85,6 +85,7 @@ pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running
 
 async fn run(options: cli::Options) -> ExitCode {
     let web_dir = options.web_dir.clone().unwrap_or_else(cli::default_web_dir);
+
     let listener = match TcpListener::bind(("127.0.0.1", options.port)).await {
         Ok(listener) => listener,
         Err(e) => {
@@ -96,6 +97,7 @@ async fn run(options: cli::Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
     let running = match start(listener, web_dir.clone()) {
         Ok(running) => running,
         Err(e) => {
@@ -103,8 +105,10 @@ async fn run(options: cli::Options) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
     let link = format!("http://127.0.0.1:{}/", running.port);
     println!("Rukh is running. Board: {link}");
+
     let mode = options.open;
     let data_dir = options.data_dir.clone();
     let target = link.clone();
@@ -118,6 +122,7 @@ async fn run(options: cli::Options) -> ExitCode {
         )
     })
     .await;
+
     match opened {
         Ok(outcome) => {
             for line in outcome.lines {
@@ -126,6 +131,7 @@ async fn run(options: cli::Options) -> ExitCode {
         }
         Err(e) => println!("Could not open the board ({e}); open {link} yourself."),
     }
+
     println!("AI clients (MCP over HTTP): {link}mcp");
     if web_dir.join("index.html").is_file() {
         println!("Board files: {}", web_dir.display());
@@ -136,10 +142,12 @@ async fn run(options: cli::Options) -> ExitCode {
             web_dir.display()
         );
     }
+
     println!("Press Ctrl+C to stop.");
     if let Err(e) = tokio::signal::ctrl_c().await {
         eprintln!("rukh: cannot listen for Ctrl+C ({e}); stopping now.");
     }
+
     println!("Stopping.");
     running.stop().await;
     ExitCode::SUCCESS
@@ -153,6 +161,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
     let options = match command {
         Command::Help => {
             println!("{}", cli::USAGE);
@@ -164,6 +173,7 @@ fn main() -> ExitCode {
         }
         Command::Run(options) => options,
     };
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -174,5 +184,6 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
     runtime.block_on(run(options))
 }

@@ -1,22 +1,17 @@
-// Tests for the view agent's half of the 2D/3D work: three/scene.js (view mode, seat rotation,
-// lighting rig) and three/board.js (the 2D board look and overlay stacking).
-//
-// There is no browser here, so the DOM is stubbed just deeply enough for three to run: a canvas with a
-// 2-D context (board.js draws its coordinate strips into one), an element that OrbitControls can attach
-// to, and a stand-in renderer handed to createView through its third `deps` argument. Everything that
-// actually matters — the camera, the controls, the lights, the raycaster, the geometry — is real three.
-//
-// Run: node --test test/board-mapping.test.mjs test/view-modes.test.mjs
+// The 2D/3D view: three/scene.js (view mode, seat rotation, lighting) and three/board.js (the 2D look).
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// ---------------------------------------------------------------- DOM shim (must precede three)
+// DOM shim: must be in place before three is imported.
 
 function makeCtx2d() {
   const calls = { fillText: 0, strokeText: 0, clearRect: 0, fillRect: 0 };
   return {
     calls,
-    font: '', textAlign: '', textBaseline: '', lineJoin: '', lineWidth: 0, strokeStyle: '', fillStyle: '',
+    font: '', textAlign: '', textBaseline: '',
+    lineJoin: '', lineWidth: 0, strokeStyle: '', fillStyle: '',
+
     clearRect() { calls.clearRect++; },
     fillRect() { calls.fillRect++; },
     save() {}, restore() {}, translate() {}, rotate() {},
@@ -34,15 +29,36 @@ function makeElement(tag = 'div') {
     clientWidth: 800, clientHeight: 800,
     parentNode: null, children: [],
     _ctx: null,
+
     get ownerDocument() { return globalThis.document; },
     getRootNode() { return globalThis.document; },
-    getContext() { if (!el._ctx) el._ctx = makeCtx2d(); return el._ctx; },
+
+    getContext() {
+      if (!el._ctx) el._ctx = makeCtx2d();
+      return el._ctx;
+    },
+
     setAttribute() {}, removeAttribute() {},
     addEventListener() {}, removeEventListener() {},
-    setPointerCapture() {}, releasePointerCapture() {}, hasPointerCapture() { return false; },
-    appendChild(c) { el.children.push(c); c.parentNode = el; return c; },
-    removeChild(c) { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); c.parentNode = null; return c; },
-    getBoundingClientRect() { return { left: 0, top: 0, width: el.clientWidth, height: el.clientHeight, right: el.clientWidth, bottom: el.clientHeight }; },
+    setPointerCapture() {}, releasePointerCapture() {},
+    hasPointerCapture() { return false; },
+
+    appendChild(c) {
+      el.children.push(c);
+      c.parentNode = el;
+      return c;
+    },
+
+    removeChild(c) {
+      const i = el.children.indexOf(c);
+      if (i >= 0) el.children.splice(i, 1);
+      c.parentNode = null;
+      return c;
+    },
+
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: el.clientWidth, height: el.clientHeight, right: el.clientWidth, bottom: el.clientHeight };
+    },
   };
   return el;
 }
@@ -57,17 +73,36 @@ globalThis.window = { devicePixelRatio: 1, addEventListener() {}, removeEventLis
 globalThis.getComputedStyle = () => ({ position: 'relative', overflow: 'hidden' });
 
 let rafCb = null;
-globalThis.requestAnimationFrame = fn => { rafCb = fn; return 1; };
+
+globalThis.requestAnimationFrame = fn => {
+  rafCb = fn;
+  return 1;
+};
 globalThis.cancelAnimationFrame = () => { rafCb = null; };
+
 /** Run one render-loop frame (the loop re-registers itself, so this can be called repeatedly). */
-function pump() { const cb = rafCb; rafCb = null; if (cb) cb(); }
+function pump() {
+  const cb = rafCb;
+  rafCb = null;
+  if (cb) cb();
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 /** Drive the render loop until a camera tween's promise settles, then return its value. */
 async function finish(promise, timeoutMs = 4000) {
   let done = false, value;
-  promise.then(v => { done = true; value = v; });
+  promise.then(v => {
+    done = true;
+    value = v;
+  });
+
   const t0 = Date.now();
-  while (!done && Date.now() - t0 < timeoutMs) { await sleep(4); pump(); }
+  while (!done && Date.now() - t0 < timeoutMs) {
+    await sleep(4);
+    pump();
+  }
+
   if (!done) throw new Error('camera tween never settled');
   return value;
 }
@@ -78,7 +113,7 @@ const { createView, LIGHTING_PRESETS, DEFAULT_LIGHTING, resolveLighting, lightin
 const { emitsLight } = await import('../src/three/glow.js');
 const { createBoard, SQUARES, squareToWorld } = await import('../src/three/board.js');
 
-// ---------------------------------------------------------------- world fakes
+// World fakes.
 
 function makeRenderer() {
   const canvas = makeElement('canvas');
@@ -117,17 +152,22 @@ function sphericalOf(view) {
   const off = view.camera.position.clone().sub(view.controls.target);
   return new THREE.Spherical().setFromVector3(off);
 }
+
 /** Camera azimuth about the BOARD centre — what "seat" means. */
 const boardTheta = view => Math.atan2(view.camera.position.x, view.camera.position.z);
-const wrap = d => { d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI; return d; };
+const wrap = d => {
+  d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return d;
+};
 
-// ================================================================ pure lighting model
+// Pure lighting model.
 
 test('lighting presets resolve to the intensities they advertise', () => {
   for (const name of ['studio', 'soft', 'bright']) {
     const r = resolveLighting({ preset: name }, DEFAULT_LIGHTING);
     const v = lightingValues(r);
     const def = LIGHTING_PRESETS[name];
+
     assert.equal(r.preset, name);
     assert.equal(r.key, 1, 'a preset switch resets the key multiplier');
     assert.equal(r.ambient, 1, 'a preset switch resets the ambient multiplier');
@@ -141,7 +181,8 @@ test('lighting presets resolve to the intensities they advertise', () => {
     assert.equal(v.washGuard, 1, name + ' at its defaults is below the wash ceiling');
     assert.equal(v.exposure, def.exposure);
   }
-  // relative brightness: soft is the gentlest key, bright the most exposed
+
+  // Relative brightness: soft is the gentlest key, bright the most exposed.
   assert.ok(LIGHTING_PRESETS.soft.key < LIGHTING_PRESETS.studio.key);
   assert.ok(LIGHTING_PRESETS.soft.hemi > LIGHTING_PRESETS.studio.hemi);
   assert.ok(LIGHTING_PRESETS.bright.exposure > LIGHTING_PRESETS.studio.exposure);
@@ -174,7 +215,7 @@ test('key / ambient are multipliers and every knob is clamped', () => {
   assert.equal(clamped.key, 0);
   assert.equal(clamped.ambient, 2);
 
-  // a patch that does not name the preset keeps the current multipliers
+  // A patch that does not name the preset keeps the current multipliers.
   const kept = resolveLighting({ exposure: 1.2 }, { preset: 'soft', on: true, exposure: 1.05, key: 0.4, ambient: 1.9, shadows: false });
   assert.equal(kept.preset, 'soft');
   assert.equal(kept.key, 0.4);
@@ -184,8 +225,9 @@ test('key / ambient are multipliers and every knob is clamped', () => {
 });
 
 test('every lit key is mirrored past the table rim from both seats (no lamp glare on the table)', () => {
-  // the seat presets as authored, and shoot.mjs's low three-quarter views from each side
+  // The seat presets as authored, and shoot.mjs's low three-quarter views from each side.
   const cameras = { white: [0, 7.5, 9], black: [0, 7.5, -9], low: [1.2, 3.1, 8.6], 'low-black': [-1.2, 3.1, -8.6] };
+
   for (const name of ['studio', 'soft', 'bright']) {
     for (const [seat, cam] of Object.entries(cameras)) {
       const p = keyMirrorPoint(LIGHTING_PRESETS[name].keyPos, cam);
@@ -193,7 +235,8 @@ test('every lit key is mirrored past the table rim from both seats (no lamp glar
       assert.ok(r > TABLE_TOP.radius + 0.75, `${name} key seen from ${seat}: mirror at r=${r.toFixed(2)} (rim ${TABLE_TOP.radius})`);
     }
   }
-  // the helper agrees with the glare that prompted this: the old front-right key landed on the table from Black
+
+  // The helper agrees that a front-right key at [5.5, 8, 4.5] glares on the table from Black.
   const old = keyMirrorPoint([5.5, 8.0, 4.5], cameras['low-black']);
   assert.ok(Math.hypot(old.x, old.z) < TABLE_TOP.radius);
   assert.equal(keyMirrorPoint([5, 8, 0], [0, TABLE_TOP.y - 1, 5]), null, 'a camera under the plane sees no mirror');
@@ -202,6 +245,7 @@ test('every lit key is mirrored past the table rim from both seats (no lamp glar
 test('the wash guard only bites when the board would blow out', () => {
   const sane = lightingValues(resolveLighting({ preset: 'bright' }));
   assert.equal(sane.washGuard, 1);
+
   const cranked = lightingValues(resolveLighting({ preset: 'bright', exposure: 1.8, key: 2, ambient: 2 }));
   assert.ok(cranked.washGuard < 1, 'everything at maximum is pulled back');
   assert.ok(cranked.exposure < 1.8 && cranked.exposure > 0.4);
@@ -214,12 +258,13 @@ test('fitDistance frames the board on the tighter screen axis', () => {
   const narrow = fitDistance(4.95, 12, 0.5);
   assert.equal(wide, square, 'a wide pane is limited by its height, same as a square one');
   assert.ok(narrow > square, 'a narrow pane must pull back further');
+
   assert.equal(seatTheta('white'), 0);
   assert.equal(seatTheta('black'), Math.PI);
   assert.equal(seatTheta('nonsense'), 0);
 });
 
-// ================================================================ scene.js — view mode
+// scene.js: view mode.
 
 test('2D locks the camera straight overhead with orbit off, pan and zoom on', async () => {
   const { view } = makeView();
@@ -245,9 +290,11 @@ test('2D locks the camera straight overhead with orbit off, pan and zoom on', as
   assert.ok(view.camera.fov < 20, 'a narrow field of view is what makes it near-orthographic');
   assert.ok(view.camera.near > 1, 'the near plane is pulled in so the overlay stack does not z-fight');
 
-  // a frame must not drag it out of the lock
-  pump(); pump();
+  // A frame must not drag it out of the lock.
+  pump();
+  pump();
   assert.ok(sphericalOf(view).phi <= 0.004);
+
   view.dispose();
 });
 
@@ -255,24 +302,29 @@ test('a Flip made in 2D brings 3D back at the new seat, both ways (critique r2 r
   const { view } = makeView();
   await finish(view.setPreset('white'));
   const before = view.camera.position.clone();
+
   await finish(view.setViewMode('2d'));
   await finish(view.rotateSeat('black'));       // Flip while 2D
   await finish(view.setViewMode('3d'));
+
   assert.equal(view.orientation, 'black', 'the camera sits at the seat of the current orientation');
   assert.ok(view.camera.position.z < -5, `camera z ${view.camera.position.z.toFixed(2)} is on Black's side`);
   assert.ok(Math.abs(view.camera.position.y - before.y) < 1e-6, 'the same height and framing, from the other side');
   assert.ok(Math.abs(view.camera.position.z + before.z) < 1e-6 && Math.abs(view.camera.position.x + before.x) < 1e-6);
   assert.equal(view.preset, 'black');
-  // the reverse sequence: from Black's seat, 2D, Flip back to White, 3D
+
+  // The reverse sequence: from Black's seat, 2D, Flip back to White, 3D.
   await finish(view.setViewMode('2d'));
   await finish(view.rotateSeat('white'));
   await finish(view.setViewMode('3d'));
   assert.equal(view.orientation, 'white');
   assert.ok(view.camera.position.z > 5, `camera z ${view.camera.position.z.toFixed(2)} is on White's side`);
-  // no Flip in between: the pose comes back exactly (unchanged behaviour)
+
+  // No Flip in between: the pose comes back exactly.
   await finish(view.setViewMode('2d'));
   await finish(view.setViewMode('3d'));
   assert.ok(view.camera.position.distanceTo(before) < 1e-6);
+
   view.dispose();
 });
 
@@ -280,23 +332,28 @@ test('2D frames the whole board inside the stage the toolbar and status chip lea
   const { view } = makeView();                        // an 800 x 800 stage
   view.setSafeArea({ top: 90, bottom: 50 });
   await finish(view.setViewMode('2d'));
+
   const corners = () => [[-4.6, -4.6], [4.6, -4.6], [4.6, 4.6], [-4.6, 4.6]].map(([x, z]) => view.worldToClient({ x, y: 0, z }));
   for (const seat of ['white', 'black']) {
     await finish(view.rotateSeat(seat));
+
     const c = corners(), ys = c.map(p => p.y), xs = c.map(p => p.x);
     assert.ok(Math.min(...ys) >= 90 - 0.5, `${seat}: the frame's top edge clears the toolbar (${Math.min(...ys).toFixed(1)})`);
     assert.ok(Math.max(...ys) <= 800 - 50 + 0.5, `${seat}: and its bottom edge the chip (${Math.max(...ys).toFixed(1)})`);
     assert.ok(Math.abs((Math.min(...ys) + Math.max(...ys)) / 2 - (90 + 750) / 2) < 1, `${seat}: centred in the free band`);
     assert.ok(Math.abs((Math.min(...xs) + Math.max(...xs)) / 2 - 400) < 1, `${seat}: and across`);
   }
-  // squares still map exactly (the aim moved, the mapping did not)
+
+  // Squares still map exactly: the aim moved, the mapping did not.
   const e4 = view.worldToClient({ x: 0.5, y: 0, z: -0.5 });
   const hit = view.pointerToPlane(e4.x, e4.y, 0);
   assert.ok(Math.abs(hit.x - 0.5) < 1e-3 && Math.abs(hit.z + 0.5) < 1e-3);
-  // the insets going away re-frames to the whole stage
+
+  // The insets going away re-frames to the whole stage.
   view.setSafeArea({});
   const ys = corners().map(p => p.y);
   assert.ok(Math.abs((Math.min(...ys) + Math.max(...ys)) / 2 - 400) < 1);
+
   view.dispose();
 });
 
@@ -320,8 +377,7 @@ test('going 2D and back restores the 3D pose', async () => {
   await finish(view.setViewMode('3d', { duration: 1 }));
 
   assert.equal(view.viewMode, '3d');
-  // The pose is copied back exactly; the only drift is OrbitControls' own spherical round-trip on the
-  // frame that follows, which is ~1e-16.
+  // Copied back exactly; OrbitControls' spherical round trip on the next frame drifts ~1e-16.
   for (const axis of ['x', 'y', 'z']) {
     assert.ok(Math.abs(view.camera.position[axis] - snap.pos[axis]) < 1e-9, 'camera.' + axis);
     assert.ok(Math.abs(view.controls.target[axis] - snap.target[axis]) < 1e-9, 'target.' + axis);
@@ -334,6 +390,7 @@ test('going 2D and back restores the 3D pose', async () => {
   assert.equal(view.controls.minPolarAngle, snap.minPolar);
   assert.equal(view.controls.maxPolarAngle, snap.maxPolar);
   assert.equal(view.controls.enableRotate, true, 'orbit comes back');
+
   view.dispose();
 });
 
@@ -341,15 +398,19 @@ test('setViewMode is idempotent, honours animate:false, and fires its hook', asy
   const { view } = makeView();
   const seen = [];
   const off = view.onViewModeChange((m, prev) => seen.push([m, prev]));
+
   assert.equal(await view.setViewMode('3d'), true, 'already there');
   assert.deepEqual(seen, []);
+
   assert.equal(await view.setViewMode('2d', { animate: false }), true);
   assert.equal(view.viewMode, '2d');
   assert.equal(view.transitioning, false, 'animate:false finishes synchronously');
   assert.deepEqual(seen, [['2d', '3d']]);
+
   off();
   await view.setViewMode('3d', { animate: false });
   assert.deepEqual(seen, [['2d', '3d']], 'unsubscribed');
+
   view.dispose();
 });
 
@@ -358,10 +419,11 @@ test('settings.viewMode === "2d" boots straight into 2D', () => {
   assert.equal(view.viewMode, '2d');
   assert.equal(view.controls.enableRotate, false);
   assert.ok(sphericalOf(view).phi <= 0.004);
+
   view.dispose();
 });
 
-// ================================================================ scene.js — pointer round trip
+// scene.js: pointer round trip.
 
 /** Project a world point to client coords, cast it back, and name the square it landed on. */
 function squareUnder(view, board, world) {
@@ -385,10 +447,11 @@ for (const mode of ['3d', '2d']) {
       for (const sq of SQUARES) {
         const w = squareToWorld(sq);
         assert.equal(squareUnder(view, board, new THREE.Vector3(w.x, 0, w.z)), sq, sq + ' centre');
-        // not just the centre: the corners of the square must resolve to it too
+        // Not just the centre: the corners of the square must resolve to it too.
         assert.equal(squareUnder(view, board, new THREE.Vector3(w.x - 0.45, 0, w.z - 0.45)), sq, sq + ' -/-');
         assert.equal(squareUnder(view, board, new THREE.Vector3(w.x + 0.45, 0, w.z + 0.45)), sq, sq + ' +/+');
       }
+
       board.dispose();
       view.dispose();
     });
@@ -401,6 +464,7 @@ test('view.raycast still picks the right square mesh in 2D', async () => {
   await finish(view.setViewMode('2d', { duration: 1 }));
   view.scene.updateMatrixWorld(true);
   const targets = [...board.squareMeshes.values()];
+
   for (const sq of ['a1', 'e4', 'd5', 'h8', 'a8', 'h1', 'c6']) {
     const w = squareToWorld(sq);
     const c = view.worldToClient(new THREE.Vector3(w.x, 0, w.z));
@@ -408,11 +472,12 @@ test('view.raycast still picks the right square mesh in 2D', async () => {
     assert.ok(hits.length, 'a ray fired at ' + sq + ' must hit something');
     assert.equal(hits[0].object.userData.square, sq);
   }
+
   board.dispose();
   view.dispose();
 });
 
-// ================================================================ scene.js — seat rotation
+// scene.js: seat rotation.
 
 for (const mode of ['3d', '2d']) {
   test(`rotateSeat turns the board about its centre in ${mode}`, async () => {
@@ -431,8 +496,9 @@ for (const mode of ['3d', '2d']) {
     assert.ok(Math.abs(wrap(boardTheta(view))) < 1e-6, 'and back');
     assert.equal(view.orientation, 'white');
 
-    // already seated there -> resolves immediately, no tween
+    // Already seated there: resolves immediately, no tween.
     assert.equal(await view.rotateSeat('white'), true);
+
     view.dispose();
   });
 }
@@ -444,13 +510,15 @@ test('rotateSeat rotates the pan target too, so the board turns rather than the 
   view.controls.update();
   const r0 = view.camera.position.distanceTo(view.controls.target);
   const targetRadius = Math.hypot(view.controls.target.x, view.controls.target.z);
+
   await finish(view.rotateSeat('black', { duration: 1 }));
-  // The whole view is turned rigidly about the board centre: the camera lands on the black seat and the
-  // pan target swings with it, keeping its distance from the centre and from the camera.
+
+  // The whole view turns rigidly about the board centre, the pan target with it.
   assert.ok(Math.abs(wrap(boardTheta(view) - Math.PI)) < 1e-6);
   assert.ok(view.controls.target.x < 0, 'the target swung to the far side: ' + view.controls.target.x);
   assert.ok(Math.abs(Math.hypot(view.controls.target.x, view.controls.target.z) - targetRadius) < 1e-9);
   assert.ok(Math.abs(view.camera.position.distanceTo(view.controls.target) - r0) < 1e-9);
+
   view.dispose();
 });
 
@@ -466,26 +534,29 @@ test('rotateSeat is cancellable mid-flight', async () => {
   assert.equal(await finish(fast), true);
   assert.ok(Math.abs(wrap(boardTheta(view))) < 1e-6);
 
-  // a mode switch also takes the camera over
+  // A mode switch also takes the camera over.
   const slow2 = view.rotateSeat('black', { duration: 5000 });
   pump();
   const modeSwitch = view.setViewMode('2d', { duration: 1 });
   assert.equal(await slow2, false);
   assert.equal(await finish(modeSwitch), true);
   assert.equal(view.viewMode, '2d');
+
   view.dispose();
 });
 
 test('flipTo delegates to rotateSeat and still returns a promise', async () => {
   const { view } = makeView();
+
   const p = view.flipTo('black');
   assert.ok(p && typeof p.then === 'function');
   await finish(p);
+
   assert.equal(view.orientation, 'black');
   view.dispose();
 });
 
-// ================================================================ scene.js — lighting, live
+// scene.js: lighting, live.
 
 test('setLighting drives the real lights, renderer and material set', () => {
   const { view, renderer } = makeView();
@@ -515,6 +586,7 @@ test('setLighting drives the real lights, renderer and material set', () => {
   view.setLighting({ exposure: 0.7 });
   assert.equal(renderer.toneMappingExposure, 0.7 * P.exposure);
   assert.equal(view.lighting.exposure, 0.7);
+
   view.dispose();
 });
 
@@ -526,15 +598,17 @@ test('the seat fill comes from behind the camera, a close-up inside the board in
     view.camera.lookAt(view.controls.target);
     view.render();
   };
-  // the seats, shoot.mjs's low views, and its close look at Black's e8 king from White's side: a camera on
-  // Black's half of the board looking away from White, which the old azimuth-about-the-centre aim lit from behind
+
+  // The seats, shoot.mjs's low views, and a close look at Black's e8 king from a camera on Black's half.
   const shots = {
     white: [[0, 7.5, 9], [0, 0, 0]], black: [[0, 7.5, -9], [0, 0, 0]],
     low: [[1.2, 3.1, 8.6], [0, 0.35, 0]], 'low-black': [[-1.2, 3.1, -8.6], [0, 0.35, 0]],
     'close-black-king': [[1.6, 1.25, -1.55], [0.5, 0.5, -3.5]],
   };
+
   for (const [name, [pos, tgt]] of Object.entries(shots)) {
     place(pos, tgt);
+
     const seat = view.lights.seat;
     const from = seat.position.clone().sub(seat.target.position).normalize();
     const back = view.camera.position.clone().sub(view.controls.target).setY(0).normalize();
@@ -542,28 +616,36 @@ test('the seat fill comes from behind the camera, a close-up inside the board in
     assert.ok(along > 0.999, `${name}: the fill comes from the camera's side (${along.toFixed(3)})`);
     assert.ok(Math.abs(Math.asin(from.y) - 15 * Math.PI / 180) < 1e-6, `${name}: 15 degrees up`);
   }
+
   view.dispose();
 });
 
 test('the room behind the board is dithered: the background shader of three is patched, once', () => {
   const a = makeView(), b = makeView();
+
   const f = THREE.ShaderLib.backgroundCube.fragmentShader;
+
   assert.equal(f.split('cbDither(').length - 1, 2, 'one noise function, one use (a second view does not patch again)');
   assert.ok(f.indexOf('#include <colorspace_fragment>') < f.indexOf('+= ( cbDither'), 'after the colour-space step: on the 8-bit values');
-  a.view.dispose(); b.view.dispose();
+
+  a.view.dispose();
+  b.view.dispose();
 });
 
 test('the pedestal grain runs along the profile by arc length and wraps whole tiles around', () => {
-  // points bunched at the top, as the pedestal's collar and flare are: the old index-based v squeezed the grain there
+  // Points bunched at the top, as the pedestal's collar and flare are.
   const profile = [[0.6, 0], [0.6, 2], [0.62, 2.05], [0.66, 2.1], [0.7, 2.12], [1.2, 2.2]].map(([x, y]) => new THREE.Vector2(x, y));
   const segments = 8, unit = 14.68, tiles = 1, repeat = 1.6;
+
   const geo = turnedUVs(new THREE.LatheGeometry(profile, segments), profile, segments, unit, tiles, repeat);
+
   const uv = geo.attributes.uv;
   let s = 0;
   for (let j = 0; j < profile.length; j++) {
     if (j) s += profile[j].distanceTo(profile[j - 1]);
     for (const i of [0, 3, segments]) assert.ok(Math.abs(uv.getX(i * profile.length + j) - s / unit) < 1e-6, `u = arc length (${j})`);
   }
+
   assert.ok(Math.abs(uv.getY(segments * profile.length) * repeat - tiles) < 1e-6, 'a whole tile around: no seam');
   geo.dispose();
 });
@@ -571,26 +653,34 @@ test('the pedestal grain runs along the profile by arc length and wraps whole ti
 /** An equirect DataTexture (half floats, row 0 = the zenith) filled by fn(elevationDeg, lonDeg) -> [r, g, b]. */
 function panorama(w, h, fn) {
   const data = new Uint16Array(w * h * 4);
+
   for (let y = 0; y < h; y++) {
     const el = (0.5 - (y + 0.5) / h) * 180;
+
     for (let x = 0; x < w; x++) {
       const [r, g, b] = fn(el, (x + 0.5) / w * 360);
       const i = (y * w + x) * 4;
-      data[i] = THREE.DataUtils.toHalfFloat(r); data[i + 1] = THREE.DataUtils.toHalfFloat(g);
-      data[i + 2] = THREE.DataUtils.toHalfFloat(b); data[i + 3] = THREE.DataUtils.toHalfFloat(1);
+      data[i] = THREE.DataUtils.toHalfFloat(r);
+      data[i + 1] = THREE.DataUtils.toHalfFloat(g);
+      data[i + 2] = THREE.DataUtils.toHalfFloat(b);
+      data[i + 3] = THREE.DataUtils.toHalfFloat(1);
     }
   }
+
   return new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.HalfFloatType);
 }
+
 const px = (tex, x, y) => {
   const i = (y * tex.image.width + x) * 4, f = THREE.DataUtils.fromHalfFloat;
   return [f(tex.image.data[i]), f(tex.image.data[i + 1]), f(tex.image.data[i + 2])];
 };
 
 test('the pieces reflect the table and the board below the horizon, not the room\u2019s floor (critique r4)', () => {
-  // a room with a saturated rug below the horizon and a warm wall above
+  // A room with a saturated rug below the horizon and a warm wall above.
   const eq = panorama(128, 64, (el) => (el < 0 ? [2, 0, 1.5] : [0.3, 0.2, 0.1]));
+
   const out = tableUnder(eq, 0.15);
+
   const rowAt = (el) => Math.floor((0.5 - el / 180) * 64);
   assert.deepEqual(px(out, 5, rowAt(40)).map((v) => +v.toFixed(3)), [0.3, 0.2, 0.1], 'above the horizon: the room, untouched');
   const table = px(out, 5, rowAt(-5)), board = px(out, 5, rowAt(-60));
@@ -598,6 +688,7 @@ test('the pieces reflect the table and the board below the horizon, not the room
     assert.ok(Math.max(...c) - Math.min(...c) < Math.max(...c) * 0.9, `${name}, not the rug's colour`);
     assert.ok(c[0] >= c[1] && c[1] >= c[2], `${name}: warm, not magenta`);
   }
+
   const lum = (c) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
   assert.ok(lum(table) < 0.03, 'the walnut table is dark');
   assert.ok(Math.abs(lum(board) - 0.15) < 0.02, 'the board is the given luminance');
@@ -605,11 +696,13 @@ test('the pieces reflect the table and the board below the horizon, not the room
 });
 
 test('the reflection blur is a smooth Gaussian on the sphere: no spiral sampling, energy kept', () => {
-  // one small, very bright light in a dark room: the case PMREM's twenty-sample spiral blurred into speckle
+  // One small, very bright light in a dark room: the case PMREM's twenty-sample spiral blurs into speckle.
   const eq = panorama(128, 64, (el, lon) => (Math.abs(el - 20) < 3 && Math.abs(lon - 90) < 3 ? [400, 400, 400] : [0.02, 0.02, 0.02]));
+
   const out = blurEquirect(eq, 0.8);
   assert.deepEqual([out.image.width, out.image.height], [64, 32]);
-  // monotonic falloff away from the light along its row: a smooth lobe, not a pattern
+
+  // Monotonic falloff away from the light along its row: a smooth lobe, not a pattern.
   const row = Math.round((0.5 - 20 / 180) * 32 - 0.5), peak = Math.round(90 / 360 * 64 - 0.5);
   let prev = Infinity;
   for (let d = 0; d <= 12; d++) {
@@ -617,7 +710,8 @@ test('the reflection blur is a smooth Gaussian on the sphere: no spiral sampling
     assert.ok(v <= prev + 1e-3, `falls off smoothly (${d})`);
     prev = v;
   }
-  // the total (solid-angle weighted) light is kept
+
+  // The total (solid-angle weighted) light is kept.
   const total = (tex, w, h, read) => {
     let sum = 0;
     for (let y = 0; y < h; y++) {
@@ -632,7 +726,9 @@ test('the reflection blur is a smooth Gaussian on the sphere: no spiral sampling
 
 test('the Studio background rolls its highlights off; the rest of the panorama is untouched', () => {
   const eq = panorama(8, 4, (el, lon) => (lon < 45 ? [534, 400, 300] : [0.4, 0.5, 0.6]));
+
   const out = kneeEquirect(eq, 80);
+
   assert.deepEqual(px(out, 3, 1).map((v) => +v.toFixed(2)), [0.4, 0.5, 0.6], 'below the knee: as it was');
   const hot = px(out, 0, 1);
   assert.ok(Math.max(...hot) < 160 && Math.max(...hot) > 80, `the softbox rolled off below twice the knee (${hot[0].toFixed(0)})`);
@@ -644,6 +740,7 @@ test('the glow only takes what gives off light', () => {
   assert.equal(emitsLight(new THREE.MeshStandardMaterial({ color: 0xffffff })), false, 'porcelain under a lamp: not emissive');
   assert.equal(emitsLight(new THREE.MeshStandardMaterial({ emissive: 0xffffff, emissiveIntensity: 0 })), false);
   assert.equal(emitsLight(new THREE.MeshBasicMaterial({ color: 0xffffff })), false, 'overlays and the mask pass');
+
   const unlit = new THREE.MeshStandardMaterial({ emissive: 0x336699 });
   unlit.userData.litBackup = {};
   assert.equal(emitsLight(unlit), false, 'the unlit look parks its colour in emissive: not a light');
@@ -651,22 +748,33 @@ test('the glow only takes what gives off light', () => {
 
 test('the edge light: on in lit 3D with the room tint, off in 2D and unlit, fed the board centre depth', async () => {
   const { view } = makeView();
-  const lit = () => { const c = view.edgeLight.color; return c.r + c.g + c.b; };
+  const lit = () => {
+    const c = view.edgeLight.color;
+    return c.r + c.g + c.b;
+  };
+
   view.setLighting({ preset: 'studio' });
   view.render();
   assert.ok(lit() > 0, 'on in lit 3D');
+
   const c = view.edgeLight.color, tint = ENVIRONMENTS.plain.tint;
   assert.ok(Math.abs(c.g / c.r - tint[1] / tint[0]) < 1e-6 && Math.abs(c.b / c.r - tint[2] / tint[0]) < 1e-6, 'the room tint');
+
   const centre = new THREE.Vector3(0, 0, 0).applyMatrix4(view.camera.matrixWorldInverse);
   assert.ok(Math.abs(view.edgeLight.focus + centre.z) < 1e-6, 'the board centre, in view depth');
+
   view.setLighting({ on: false });
   assert.equal(lit(), 0, 'off when unlit');
+
   view.setLighting({ on: true });
   assert.ok(lit() > 0);
+
   await finish(view.setViewMode('2d', { duration: 1 }));
   assert.equal(lit(), 0, 'off in 2D');
+
   await finish(view.setViewMode('3d', { duration: 1 }));
   assert.ok(lit() > 0, 'and back on in 3D');
+
   view.dispose();
 });
 
@@ -695,30 +803,34 @@ test('lighting off routes to the unlit materials instead of going dark', () => {
   assert.equal(renderer.toneMapping, THREE.ACESFilmicToneMapping);
   assert.ok(view.lights.key.intensity > 0);
 
-  // the 'flat' preset is the same thing by another name
+  // The 'flat' preset is the same thing by another name.
   view.setLighting({ preset: 'flat' });
   assert.equal(view.lighting.unlit, true);
   assert.equal(mats.unlit, true);
   assert.equal(view.lights.key.intensity, 0);
   assert.equal(view.scene.environmentIntensity, 0);
 
-  // a material set handed over while unlit arrives unlit
+  // A material set handed over while unlit arrives unlit.
   const later = makeMatSet();
   view.setMaterialSet(later);
   assert.equal(later.unlit, true);
+
   view.dispose();
 });
 
 test('shadows are one setting, whether they are set through setLighting or setQuality', () => {
   const { view, renderer } = makeView();
   assert.equal(view.lighting.shadows, true);
+
   view.setLighting({ shadows: false });
   assert.equal(renderer.shadowMap.enabled, false);
   assert.equal(view.lights.key.castShadow, false);
+
   view.setQuality({ shadows: true });
   assert.equal(view.lighting.shadows, true);
   assert.equal(renderer.shadowMap.enabled, true);
   assert.equal(view.lights.key.castShadow, true);
+
   view.dispose();
 });
 
@@ -726,13 +838,16 @@ test('onLighting fires with the resolved values', () => {
   const { view } = makeView();
   const seen = [];
   const off = view.onLighting(l => seen.push(l));
+
   view.setLighting({ preset: 'soft' });
   assert.equal(seen.length, 1);
   assert.equal(seen[0].preset, 'soft');
   assert.equal(seen[0].applied.key, LIGHTING_PRESETS.soft.key);
+
   off();
   view.setLighting({ preset: 'studio' });
   assert.equal(seen.length, 1);
+
   view.dispose();
 });
 
@@ -741,55 +856,65 @@ test('soft shadows are VSMShadowMap blurred by the preset radius (the PCF per-pi
   assert.equal(renderer.shadowMap.type, THREE.VSMShadowMap);
   assert.ok(view.lights.key.shadow.blurSamples >= 12, 'enough blur taps for a smooth ramp');
   assert.equal(view.lights.key.shadow.radius, LIGHTING_PRESETS.studio.shadowRadius);
+
   view.setLighting({ preset: 'soft' });
   assert.equal(view.lights.key.shadow.radius, LIGHTING_PRESETS.soft.shadowRadius);
   assert.ok(LIGHTING_PRESETS.soft.shadowRadius > LIGHTING_PRESETS.studio.shadowRadius, 'soft is the softer shadow');
   assert.deepEqual(view.lights.key.position.toArray(), LIGHTING_PRESETS.soft.keyPos);
+
   view.dispose();
 });
 
 test('the 3D camera never drops below the table top', async () => {
   const { view } = makeView();
   pump();
-  // a pan that dragged the target under the table, and a camera placed below it by hand
+
+  // A pan that dragged the target under the table, and a camera placed below it by hand.
   view.controls.target.set(0.5, -3, 0);
   view.camera.position.set(4, -2, 6);
   pump();
   assert.ok(view.controls.target.y >= TABLE_TOP.y - 1e-9, `target y ${view.controls.target.y}`);
   assert.ok(view.camera.position.y > TABLE_TOP.y + 0.2, `camera y ${view.camera.position.y}`);
-  // a synchronous render() holds it too
+
+  // A synchronous render() holds it too.
   view.camera.position.set(3, TABLE_TOP.y - 0.5, 7);
   view.controls.target.set(0, 0, 0);
   view.render();
   assert.ok(view.camera.position.y > TABLE_TOP.y + 0.2, `camera y after render() ${view.camera.position.y}`);
-  // an ordinary low view is left exactly where it was put
+
+  // An ordinary low view is left exactly where it was put.
   view.camera.position.set(1.2, 3.1, 8.6);
   view.controls.target.set(0, 0.35, 0);
   view.render();
   assert.deepEqual(view.camera.position.toArray().map(n => +n.toFixed(6)), [1.2, 3.1, 8.6]);
+
   await finish(view.setViewMode('2d'));
   const top = view.camera.position.y;
   pump();
   assert.equal(view.camera.position.y, top, '2D is left alone');
+
   view.dispose();
 });
 
 test('settings.lighting is honoured at construction', () => {
   const { view, renderer } = makeView({ lighting: { preset: 'soft', exposure: 1.4, shadows: false } });
+
   assert.equal(view.lighting.preset, 'soft');
   assert.equal(renderer.toneMappingExposure, 1.4 * ENVIRONMENTS.plain.exposure);
   assert.equal(renderer.shadowMap.enabled, false);
   assert.equal(view.lights.key.intensity, LIGHTING_PRESETS.soft.key);
+
   view.dispose();
 });
 
-// ================================================================ board.js — the 2D look
+// board.js: the 2D look.
 
 function overlayByName(board, name) {
   let found = null;
   board.overlays.traverse(o => { if (!found && o.name === name) found = o; });
   return found;
 }
+
 const arrowsIn = board => overlayByName(board, 'arrows').children;
 
 test('board.setViewMode lifts arrows and capture rings over the pieces, and puts them back', () => {
@@ -831,7 +956,7 @@ test('board.setViewMode lifts arrows and capture rings over the pieces, and puts
   assert.ok(dot.position.y < 0.05, 'a legal dot stays on the square');
   assert.equal(dot.material.depthTest, true);
 
-  // square tints stay under the pieces in both modes
+  // Square tints stay under the pieces in both modes.
   const selected = overlayByName(board, 'selected');
   assert.ok(selected.visible && selected.position.y < 0.05);
   assert.equal(overlayByName(board, 'check').visible, true);
@@ -845,6 +970,7 @@ test('board.setViewMode lifts arrows and capture rings over the pieces, and puts
   assert.ok(Math.abs(back[0].geometry.attributes.position.getY(0) - 0.016) < 1e-6);
   assert.equal(back[0].material.depthTest, true);
   assert.equal(overlayByName(board, 'legal').children.find(m => m.name.startsWith('capture-')).material.depthTest, true);
+
   board.dispose();
 });
 
@@ -852,11 +978,12 @@ test('board 2D flattens the frame and redraws the coordinate glyphs', () => {
   const scene = new THREE.Scene();
   const board = createBoard(scene, makeMatSet(), {});
   assert.equal(board.frame.scale.y, 1);
+
   const canvas = board.labelGroup.children[0].material.map.image;
   const before = canvas.getContext('2d').calls.fillText;
   assert.ok(before >= 8, 'the file strip was drawn once at construction');
 
-  // the strips sit on the frame's top face in both modes (the flattened 2D frame used to cover them)
+  // The strips sit on the frame's top face in both modes.
   board.frame.geometry.computeBoundingBox();
   const frameTop = () => board.frame.geometry.boundingBox.max.y * board.frame.scale.y;
   const stripY = () => board.labelGroup.position.y + board.labelGroup.children[0].position.y;
@@ -872,6 +999,7 @@ test('board 2D flattens the frame and redraws the coordinate glyphs', () => {
   board.setViewMode('3d');
   assert.equal(board.frame.scale.y, 1);
   assert.ok(stripY() > frameTop(), 'back in 3D, still above');
+
   board.dispose();
 });
 
@@ -881,6 +1009,7 @@ test("3D coordinates: gilt metal on the near files and the player's left ranks, 
   const strips = board.labelGroup.children;          // south, north, west, east
   const shown = () => strips.map(m => m.visible);
   assert.deepEqual(shown(), [true, false, true, false], "White: files along White's edge, ranks on the a-file side");
+
   for (const m of strips) {
     assert.ok(m.material.isMeshStandardMaterial, '3D strips are lit metal');
     assert.equal(m.material.metalness, 1);
@@ -888,16 +1017,19 @@ test("3D coordinates: gilt metal on the near files and the player's left ranks, 
     assert.ok(m.material.bumpMap && m.material.bumpMap !== m.material.map, 'with a bevel from its own bump map');
     assert.ok(m.material.transparent, 'the canvas cuts the letters out');
   }
+
   board.setOrientation('black');
   assert.deepEqual(shown(), [false, true, false, true], "Black: files along Black's edge, ranks on the h-file side");
 
-  // 2D keeps all four flat strips; back in 3D the seat's two come back, gilt again
+  // 2D keeps all four flat strips; back in 3D the seat's two come back, gilt again.
   board.setViewMode('2d');
   assert.deepEqual(shown(), [true, true, true, true]);
   for (const m of strips) assert.ok(m.material.isMeshBasicMaterial, '2D strips are the flat look');
+
   board.setViewMode('3d');
   assert.deepEqual(shown(), [false, true, false, true]);
   assert.ok(strips[1].material.isMeshStandardMaterial);
+
   board.dispose();
 });
 
@@ -907,25 +1039,31 @@ test('the stringing inlay is 3D only and follows the theme; setUnlit flattens th
   const board = createBoard(scene, mats, {});
   assert.equal(board.inlay.visible, true);
   assert.equal(board.inlay.material, mats.lightSquare, "light-wood stringing: the light squares' material");
+
   const box = new THREE.Box3().setFromObject(board.inlay);
   assert.ok(box.max.x > 4.0 && box.max.x < 4.2, `between the squares (4.0) and the labels: ${box.max.x}`);
   assert.ok(box.max.y < 0 && box.max.y > -0.02, 'just above the frame top, below the squares');
+
   const next = makeMatSet();
   board.setMaterials(next);
   assert.equal(board.inlay.material, next.lightSquare);
+
   board.setViewMode('2d');
   assert.equal(board.inlay.visible, false);
   board.setViewMode('3d');
 
   const gilt = board.labelGroup.children[0].material;
   const gold = gilt.color.getHex();
+
   board.setUnlit(true);
   assert.equal(gilt.emissive.getHex(), gold, 'lights off: the gold moves into emissive');
   assert.equal(gilt.metalness, 0, 'not black metal without an environment');
   assert.equal(gilt.toneMapped, false);
+
   board.setUnlit(false);
   assert.equal(gilt.color.getHex(), gold);
   assert.equal(gilt.metalness, 1);
+
   board.dispose();
 });
 
@@ -934,12 +1072,15 @@ test('board honours settings.viewMode at construction and squareAtPoint is mode-
   const board = createBoard(scene, makeMatSet(), { viewMode: '2d' });
   assert.equal(board.viewMode, '2d');
   assert.ok(board.frame.scale.y < 0.5);
+
   for (const sq of SQUARES) {
     assert.equal(board.squareAtPoint(board.worldFor(sq)), sq);
   }
+
   board.setViewMode('3d');
   for (const sq of SQUARES) {
     assert.equal(board.squareAtPoint(board.worldFor(sq)), sq);
   }
+
   board.dispose();
 });

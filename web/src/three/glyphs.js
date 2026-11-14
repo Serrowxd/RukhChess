@@ -1,16 +1,12 @@
-// three/glyphs.js -- inline SVG piece art (the cburnett set) as strings, plus tiny helpers to
-// turn one glyph into a standalone SVG document / data: URL. Pure data, no three import,
-// safe to import under node. Owned by the three-pieces module.
-//
 // Piece art: "cburnett" chess pieces by Colin M.L. Burnett, licensed CC BY-SA 3.0
 // (https://creativecommons.org/licenses/by-sa/3.0/). Original SVGs from Wikimedia Commons;
-// the 12 <symbol> bodies below are copied one-to-one from Chess/4d-chess.html (viewBox 0 0 45 45).
+// the 12 <symbol> bodies below are copied one-to-one from them (viewBox 0 0 45 45).
 // Redistribution of this file must keep this attribution.
 
 /** The 12 glyph ids: w/b + K Q R B N P. */
 export const GLYPH_IDS = ["wK","wQ","wR","wB","wN","wP","bK","bQ","bR","bB","bN","bP"];
 
-/** Inner SVG markup per glyph id (the body of the original <symbol>, viewBox 0 0 45 45). */
+/** Inner SVG markup per glyph id, viewBox 0 0 45 45. */
 export const GLYPHS = {
   wK: "<g fill=\"none\" fill-rule=\"evenodd\" stroke=\"#000\" stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"1.5\"> <path stroke-linejoin=\"miter\" d=\"M22.5 11.63V6M20 8h5\"/> <path fill=\"#fff\" stroke-linecap=\"butt\" stroke-linejoin=\"miter\" d=\"M22.5 25s4.5-7.5 3-10.5c0 0-1-2.5-3-2.5s-3 2.5-3 2.5c-1.5 3 3 10.5 3 10.5\"/> <path fill=\"#fff\" d=\"M12.5 37c5.5 3.5 14.5 3.5 20 0v-7s9-4.5 6-10.5c-4-6.5-13.5-3.5-16 4V27v-3.5c-2.5-7.5-12-10.5-16-4-3 6 6 10.5 6 10.5v7\"/> <path d=\"M12.5 30c5.5-3 14.5-3 20 0m-20 3.5c5.5-3 14.5-3 20 0m-20 3.5c5.5-3 14.5-3 20 0\"/> </g>",
   wQ: "<g style=\"fill:#ffffff;stroke:#000000;stroke-width:1.5;stroke-linejoin:round\"> <path d=\"M 9,26 C 17.5,24.5 30,24.5 36,26 L 38.5,13.5 L 31,25 L 30.7,10.9 L 25.5,24.5 L 22.5,10 L 19.5,24.5 L 14.3,10.9 L 14,25 L 6.5,13.5 L 9,26 z\"/> <path d=\"M 9,26 C 9,28 10.5,28 11.5,30 C 12.5,31.5 12.5,31 12,33.5 C 10.5,34.5 11,36 11,36 C 9.5,37.5 11,38.5 11,38.5 C 17.5,39.5 27.5,39.5 34,38.5 C 34,38.5 35.5,37.5 34,36 C 34,36 34.5,34.5 33,33.5 C 32.5,31 32.5,31.5 33.5,30 C 34.5,28 36,28 36,26 C 27.5,24.5 17.5,24.5 9,26 z\"/> <path d=\"M 11.5,30 C 15,29 30,29 33.5,30\" style=\"fill:none\"/> <path d=\"M 12,33.5 C 18,32.5 27,32.5 33,33.5\" style=\"fill:none\"/> <circle cx=\"6\" cy=\"12\" r=\"2\" /> <circle cx=\"14\" cy=\"9\" r=\"2\" /> <circle cx=\"22.5\" cy=\"8\" r=\"2\" /> <circle cx=\"31\" cy=\"9\" r=\"2\" /> <circle cx=\"39\" cy=\"12\" r=\"2\" /> </g>",
@@ -31,23 +27,23 @@ const ROLE_LETTER = { king: "K", queen: "Q", rook: "R", bishop: "B", knight: "N"
 /** Glyph id for a piece, e.g. glyphId("knight", "black") -> "bN". */
 export function glyphId(role, color) {
   const r = ROLE_LETTER[role];
+
   if (!r) throw new Error("glyphId: unknown role " + role);
+
   return (color === "white" ? "w" : "b") + r;
 }
 
-/** The art's natural viewBox. Cropping it (see TOKEN_VIEWBOX in pieces.js) makes the glyph fill a token. */
+/** The art's natural viewBox. */
 export const GLYPH_VIEWBOX = "0 0 45 45";
 
-/**
- * A complete standalone SVG document string for one glyph (square, size px).
- * @param {string} id   glyph id, e.g. "wQ"
- * @param {number} size px (both width and height)
- * @param {{viewBox?: string}} [opts]  crop/zoom the art, e.g. "4 4 37 37" to trim the cburnett margin
- */
+/** A standalone square SVG document for one glyph; opts.viewBox crops the art. */
 export function glyphSvg(id, size = 256, opts = {}) {
   const body = GLYPHS[id];
+
   if (!body) throw new Error("glyphSvg: unknown glyph " + id);
+
   const vb = (opts && opts.viewBox) || GLYPH_VIEWBOX;
+
   return "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"" + vb + "\" width=\"" + size + "\" height=\"" + size + "\">" + body + "</svg>";
 }
 
@@ -61,7 +57,10 @@ const LETTER_ROLE = { K: "king", Q: "queen", R: "rook", B: "bishop", N: "knight"
 /** Inverse of glyphId: "bN" -> { role: "knight", color: "black" }. Null for an unknown id. */
 export function glyphPiece(id) {
   if (typeof id !== "string" || id.length !== 2) return null;
+
   const role = LETTER_ROLE[id[1]];
+
   if (!role || (id[0] !== "w" && id[0] !== "b")) return null;
+
   return { role, color: id[0] === "w" ? "white" : "black" };
 }

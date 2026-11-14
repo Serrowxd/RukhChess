@@ -53,6 +53,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
         web_dir: None,
         data_dir: None,
     };
+
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let (name, inline) = match arg.split_once('=') {
@@ -61,9 +62,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             }
             _ => (arg.clone(), None),
         };
+
         if inline.is_some() && matches!(name.as_str(), "--help" | "--version" | "--no-open") {
             return Err(format!("{name} takes no value (got {arg})"));
         }
+
         match name.as_str() {
             "--help" | "-h" => return Ok(Command::Help),
             "--version" | "-V" => return Ok(Command::Version),
@@ -101,17 +104,15 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, String>
             _ => return Err(format!("unknown argument {arg}")),
         }
     }
+
     Ok(Command::Run(options))
 }
 
-/// Where the built board is looked for when `--web-dir` is not given: `web/dist` beside the
-/// program or in the current folder, or in a parent folder of either that is a Rukh checkout (holds
-/// `web/build.mjs`), so `target/debug/rukh` finds the checkout without picking up some other
-/// project's `web/dist` higher up. A folder that already holds `index.html` wins; otherwise the
-/// checkout's `web/dist` (even if not built yet), so the hint page can name the right place.
+/// The board folder used when `--web-dir` is not given; see docs/program.md.
 pub fn default_web_dir() -> PathBuf {
     // (folder, whether it is the program's own folder or the current folder)
     let mut bases: Vec<(PathBuf, bool)> = Vec::new();
+
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf))
@@ -123,6 +124,7 @@ pub fn default_web_dir() -> PathBuf {
                 .map(|(i, p)| (p.to_path_buf(), i == 0)),
         );
     }
+
     if let Ok(cwd) = std::env::current_dir() {
         bases.extend(
             cwd.ancestors()
@@ -131,8 +133,10 @@ pub fn default_web_dir() -> PathBuf {
                 .map(|(i, p)| (p.to_path_buf(), i == 0)),
         );
     }
+
     let dist = |base: &Path| base.join("web").join("dist");
     let is_checkout = |base: &Path| base.join("web").join("build.mjs").is_file();
+
     if let Some((found, _)) = bases
         .iter()
         .filter(|(base, own)| *own || is_checkout(base))
@@ -140,9 +144,11 @@ pub fn default_web_dir() -> PathBuf {
     {
         return dist(found);
     }
+
     if let Some((checkout, _)) = bases.iter().find(|(base, _)| is_checkout(base)) {
         return dist(checkout);
     }
+
     std::env::current_dir()
         .map(|cwd| cwd.join("web").join("dist"))
         .unwrap_or_else(|_| PathBuf::from("web/dist"))
@@ -183,6 +189,7 @@ mod tests {
                 data_dir: Some(PathBuf::from("d/e")),
             }))
         );
+
         assert!(run(&["--port", "0"]).is_err());
         assert!(run(&["--port"]).is_err());
         assert!(run(&["--bogus"]).is_err());
@@ -204,7 +211,7 @@ mod tests {
         assert_eq!(open_of(&["--open=browser"]), Ok(OpenMode::Browser));
         assert_eq!(open_of(&["--open", "none"]), Ok(OpenMode::None));
         assert_eq!(open_of(&["--no-open"]), Ok(OpenMode::None));
-        // The last one given wins.
+
         assert_eq!(
             open_of(&["--no-open", "--open", "window"]),
             Ok(OpenMode::Window)

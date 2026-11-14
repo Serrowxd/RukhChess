@@ -1,41 +1,3 @@
-// core/store.js — application state + events + actions (CONTRACT.md "core/store.js").
-// Owns: createStore(), the singleton `store`, `actions` bound to it, settings persistence
-// (localStorage['chessboard.settings']) and study autosave (localStorage['chessboard.study']).
-//
-// API added beyond CONTRACT.md:
-//   createStore({ storage?, autosaveDelay?, game? })  — tests inject a Map-backed storage; storage
-//                                                      defaults to localStorage when it exists (guarded).
-//   store.actions, store.dispose()                    — actions bound to that store; dispose clears timers.
-//   SETTINGS_DEFAULTS, defaultSettings(), STORAGE_KEYS exported.
-//   Event 'study:change' { study }                    — emitted when title / notes / study meta change.
-//   load* actions (loadFen/loadPgn/loadStudy/loadYaml) return true/false and toast on failure instead
-//     of throwing (main.js calls them unguarded at boot).
-//   attemptMove(from, to) positional form also accepted; playMove accepts a UCI string.
-//   engineLines(lines, score, depth, bestMove, fen?)  — optional 5th arg: lines for a fen that is not
-//     the current one are ignored (stale info after a fast goto). The top line is written to the current
-//     node's `eval` (never at a lower depth than what is stored), so exports carry engine evals.
-//   Whenever the current NODE changes the engine block is primed from its stored eval (or cleared), and
-//     'engine:update' is emitted — navigating an analysed line shows evals instantly. A stored pv is
-//     only trusted when it replays in the position; setMode('play') re-primes (cancelled setup).
-//   Event order inside one game change: 'game:change' → 'engine:update' → 'position:change' →
-//     'selection:change' (the selection is cleared last so a completed promotion is not mistaken for
-//     a cancelled one by listeners that watch for a deselect while a promotion is pending).
-//   setupPlace / setupClear / setupStart / setupTurn / setupCastling emit 'game:change' with
-//     reason 'setup' (the board re-syncs from state.setup.pieces).
-//   Setup scratch also carries `epSquare`, `halfmoves`, `fullmoves` read from the current FEN (not
-//     surfaced in the UI, passed straight back to Game.fromPieces so a no-op commit is a no-op).
-//
-// Addendum v1 (2026-09-18) additions:
-//   createStore({ now?, tickInterval? })   — `now` supplies the clock's timestamps (default Date.now)
-//     and `tickInterval` the ticker period (default 200 ms). Tests inject both and pump store.tickClock().
-//   store.tickClock()                      — advance the clock to now(); what the ticker calls.
-//   actions.registerEngine(engine|null)    — the integrator hands the store the engine instance so
-//     self-play can delegate to `engine.setPlayAs(color)`. Without it the store falls back to
-//     actions.engineSetPlayAs (state only), which the engine module does not act on.
-//   state.selfPlay carries `playerSide` beyond the contract shape: the colour the person at the board is playing, so
-//     the store knows which side the engine / AI opponent owns. Defaults to the orientation at start.
-//   Self-play never locks a piece: both sides stay hand-movable in every opponent mode.
-
 import { Game } from './game.js';
 import { studyFromJSON, studyFromYaml, studyToJSON, today } from './io.js';
 import {
@@ -53,17 +15,15 @@ import {
   start as clockStartPure,
   tick as clockTickPure,
 } from './clock.js';
+import { QUALITY, normalizeQuality } from '../three/motionQuality.js';
 
-/** localStorage keys. */
 export const STORAGE_KEYS = { settings: 'chessboard.settings', study: 'chessboard.study' };
 
-/** Settings defaults (CONTRACT.md). Never mutate; use defaultSettings() for a copy. */
+/** Never mutate; use defaultSettings() for a copy. */
 export const SETTINGS_DEFAULTS = {
   theme: 'wood',
   palette: null,
-  // The modelled Classic set (three/modeledSets.js) for a fresh profile; a saved choice is kept (deepMerge), and
-  // main.js boots on Staunton until the GLB is in. 'staunton' stays the fallback if it cannot load.
-  pieceSet: 'classic',
+  pieceSet: 'classic', // main.js boots on Staunton until the GLB is in
   showLegalMoves: true,
   showCoordinates: true,
   showLastMove: true,
@@ -92,8 +52,8 @@ export const SETTINGS_DEFAULTS = {
   },
   uiTheme: 'auto',
   background: 'auto',
-  environment: 'room',     // where the board sits: 'room' | 'studio' (HDRI + table) | 'plain' (page colour)
-  quality: 'auto',         // 'auto' draws motion more cheaply on a slow machine | 'full' never does (three/scene.js)
+  environment: 'room', // 'room' | 'studio' | 'plain'
+  quality: 'auto', // 'auto' | 'high' | 'medium' | 'low'
   shadows: true,
   animations: true,
   autoRotate: false,
@@ -112,40 +72,43 @@ const isPlainObject = v => v !== null && typeof v === 'object' && !Array.isArray
 
 function clone(v) {
   if (Array.isArray(v)) return v.map(clone);
+
   if (isPlainObject(v)) {
     const out = {};
     for (const [k, x] of Object.entries(v)) out[k] = clone(x);
     return out;
   }
+
   return v;
 }
 
 function deepMerge(base, over) {
   const out = clone(base);
   if (!isPlainObject(over)) return out;
+
   for (const [k, v] of Object.entries(over)) {
     if (isPlainObject(out[k])) {
-      // The default for this key is a sub-object (settings.engine, settings.ai, settings.arrowColors…).
-      // A stored null / scalar / array there would be dereferenced blind by every reader and would take
-      // the whole boot down, so a corrupt value falls back to the default for that key.
+      // A corrupt non-object stored over a sub-object default falls back to the default.
       if (isPlainObject(v)) out[k] = deepMerge(out[k], v);
     } else {
       out[k] = clone(v);
     }
   }
+
   return out;
 }
 
-/** A fresh copy of the settings defaults. */
 export function defaultSettings() {
   return clone(SETTINGS_DEFAULTS);
 }
 
 function resolveStorage(opt) {
   if (opt !== undefined) return opt;
+
   try {
     if (typeof localStorage !== 'undefined' && localStorage) return localStorage;
-  } catch (_) { /* disabled storage */ }
+  } catch (_) {}
+
   return null;
 }
 
@@ -169,12 +132,13 @@ function storageSet(storage, key, value) {
 function storageRemove(storage, key) {
   try {
     if (storage) storage.removeItem(key);
-  } catch (_) { /* ignore */ }
+  } catch (_) {}
 }
 
 function loadSettings(storage) {
   const raw = storageGet(storage, STORAGE_KEYS.settings);
   if (!raw) return defaultSettings();
+
   try {
     const stored = JSON.parse(raw);
     const out = deepMerge(SETTINGS_DEFAULTS, isPlainObject(stored) ? stored : {});
@@ -188,46 +152,46 @@ function loadSettings(storage) {
 function setPath(obj, path, value) {
   const parts = path.split('.');
   let o = obj;
+
   for (let i = 0; i < parts.length - 1; i++) {
     if (!isPlainObject(o[parts[i]])) o[parts[i]] = {};
     o = o[parts[i]];
   }
+
   o[parts[parts.length - 1]] = value;
 }
 
 const TOAST_KINDS = new Set(['info', 'error', 'ok']);
-// chessops' defaultHeaders() placeholders — a PGN whose headers hold only these carries no information.
+
+// chessops' defaultHeaders() placeholders: headers holding only these carry no information.
 const PGN_DEFAULT_HEADER_VALUES = new Set(['?', '*', '????.??.??']);
 const PANELS = new Set(['moves', 'engine', 'ai', 'notes', 'io', 'settings']);
 const VIEW_MODES = new Set(['2d', '3d']);
 const OPPONENTS = new Set(['self', 'engine', 'ai']);
 
-/** What kind of opponent the AI seat is. Addendum v2; the page owns it, the agent obeys it. */
+/** What kind of opponent the AI seat is; the page owns it, the agent obeys it. */
 export const AI_STYLES = new Set(['silent', 'annotate', 'coach']);
 
-/**
- * Any input -> a valid style. A settings blob written by an older build, or edited by hand, must never
- * reach the bridge as an unknown style: the agent reads this field to decide what to do.
- */
+/** Any input to a valid style, so an unknown style never reaches the bridge. */
 export function normalizeAiStyle(value) {
   return typeof value === 'string' && AI_STYLES.has(value) ? value : 'annotate';
 }
-/** settings.quality: 'full' or, for anything else (an older build, a hand edit), 'auto'. */
-export function normalizeQuality(value) {
-  return value === 'full' ? 'full' : 'auto';
-}
+
+export const QUALITY_LEVELS = Object.keys(QUALITY);
+export { normalizeQuality };
+
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 const isColor = c => c === 'white' || c === 'black';
 const capitalise = s => s.charAt(0).toUpperCase() + s.slice(1);
 
-/** Create an independent store (state + events + bound actions). */
+/** An independent store: state, events and bound actions. */
 export function createStore(opts = {}) {
   const storage = resolveStorage(opts.storage);
   const autosaveDelay = Number.isFinite(opts.autosaveDelay) ? opts.autosaveDelay : 300;
   const listeners = new Map();
   const settings = loadSettings(storage);
-  // The clock's only source of time. Pure core/clock.js never calls Date.now(); the ticker below
-  // supplies every stamp, so tests can drive the whole clock from a fake.
+
+  // The clock's only source of time, so tests can drive it from a fake.
   const now = typeof opts.now === 'function' ? opts.now : () => Date.now();
   const tickInterval = Number.isFinite(opts.tickInterval) && opts.tickInterval > 0 ? opts.tickInterval : 200;
 
@@ -260,8 +224,8 @@ export function createStore(opts = {}) {
   let lastNode = state.game.current;
   let autosaveTimer = null;
   let clockTimer = null;
-  let engineController = null;      // set by actions.registerEngine (main.js)
-  let engineDelegatedColor = null;  // the colour self-play last handed the engine (null = none)
+  let engineController = null; // set by actions.registerEngine
+  let engineDelegatedColor = null; // the colour self-play last handed the engine
 
   function on(event, fn) {
     if (!listeners.has(event)) listeners.set(event, new Set());
@@ -277,6 +241,7 @@ export function createStore(opts = {}) {
   function emit(event, payload) {
     const set = listeners.get(event);
     if (!set || !set.size) return;
+
     for (const fn of [...set]) {
       try {
         fn(payload);
@@ -286,7 +251,7 @@ export function createStore(opts = {}) {
     }
   }
 
-  // ───────── internal helpers ─────────
+  // Internal helpers
 
   function toast(text, kind = 'info') {
     emit('toast', { text: String(text), kind: TOAST_KINDS.has(kind) ? kind : 'info' });
@@ -295,16 +260,18 @@ export function createStore(opts = {}) {
   function scheduleAutosave() {
     if (!storage) return;
     if (autosaveTimer) clearTimeout(autosaveTimer);
+
     autosaveTimer = setTimeout(() => {
       autosaveTimer = null;
       actions.autosave();
     }, autosaveDelay);
+
     if (autosaveTimer && typeof autosaveTimer.unref === 'function') autosaveTimer.unref();
   }
 
-  // ───────── clock ─────────
+  // Clock
 
-  /** Mirror a pure-clock result into state.clock (identity preserved); true when anything changed. */
+  /** Mirror a pure-clock result into state.clock, keeping its identity; true when anything changed. */
   function applyClock(next) {
     const changed = !clockEquals(state.clock, next);
     Object.assign(state.clock, next);
@@ -322,6 +289,7 @@ export function createStore(opts = {}) {
 
   function startTicker() {
     if (clockTimer || typeof setInterval !== 'function') return;
+
     clockTimer = setInterval(() => tickClock(), tickInterval);
     if (clockTimer && typeof clockTimer.unref === 'function') clockTimer.unref();
   }
@@ -331,17 +299,20 @@ export function createStore(opts = {}) {
     clockTimer = null;
   }
 
-  /** Advance the clock to now(); emits 'clock:tick' (or flags). The ticker calls this every 200 ms. */
+  /** Advance the clock to now(); emits 'clock:tick' or flags. */
   function tickClock() {
     if (!clockIsRunning(state.clock)) {
       stopTicker();
       return false;
     }
+
     const next = clockTickPure(state.clock, now());
+
     if (next.flagged) {
       actions.clockFlag(next.flagged);
       return true;
     }
+
     applyClock(next);
     emit('clock:tick', { white: state.clock.white, black: state.clock.black, turn: state.clock.turn, flagged: state.clock.flagged });
     return true;
@@ -351,28 +322,32 @@ export function createStore(opts = {}) {
   function clockOnMove(mover) {
     const c = state.clock;
     if (clockIsUntimed(c) || c.flagged || !isColor(c.turn)) return;
+
     const next = clockApplyMove(c, now(), { mover, nextTurn: state.game.turn() });
+
     if (next.flagged) {
       actions.clockFlag(next.flagged);
       return;
     }
+
     if (applyClock(next)) {
       emitClockChange();
       syncTicker();
     }
   }
 
-  /** Back to the configured time control (a fresh game); restarts it when self-play is running. */
+  /** Back to the configured time control; restarts it when self-play is running. */
   function resetClockForNewGame() {
     const next = clockResetPure(state.clock, normalizeTimeControl(state.settings.selfPlay.timeControl));
     const started = state.selfPlay.on ? clockStartPure(next, state.game.turn(), now()) : next;
+
     if (applyClock(started)) {
       emitClockChange();
       syncTicker();
     }
   }
 
-  // ───────── self-play ─────────
+  // Self-play
 
   function gameOver() {
     try {
@@ -390,6 +365,7 @@ export function createStore(opts = {}) {
   function setAwaiting(color) {
     const next = isColor(color) ? color : null;
     if (state.selfPlay.awaiting === next) return false;
+
     state.selfPlay.awaiting = next;
     emitSelfPlay();
     return true;
@@ -397,6 +373,7 @@ export function createStore(opts = {}) {
 
   function setEnginePlayAs(color) {
     const c = isColor(color) ? color : null;
+
     if (engineController && typeof engineController.setPlayAs === 'function') {
       // The engine module mirrors this back through actions.engineSetPlayAs.
       try {
@@ -406,21 +383,22 @@ export function createStore(opts = {}) {
         console.error('chessboard: engine.setPlayAs threw', e);
       }
     }
+
     actions.engineSetPlayAs(c);
   }
 
-  /** Point the opponent (engine / AI) at the side the person is not playing. */
+  /** Point the opponent at the side the person is not playing. */
   function applyOpponentDelegation() {
     const sp = state.selfPlay;
-    // The engine module decides for itself whether the position is playable (it checks status()), so
-    // the delegation only tracks self-play and the flag. Re-sending the same colour would cancel an
-    // in-flight search, hence the change check — and a colour we never set is never cleared, so a
-    // manual "play as" from the engine panel stays hers.
+
+    // Only on change: re-sending cancels a search, and a manual "play as" we never set stays as the person set it.
     const wantEngine = sp.on && sp.opponent === 'engine' && !state.clock.flagged ? otherColor(sp.playerSide) : null;
+
     if (wantEngine !== engineDelegatedColor) {
       engineDelegatedColor = wantEngine;
       setEnginePlayAs(wantEngine);
     }
+
     if (sp.on && sp.opponent === 'ai' && !gameOver() && !state.clock.flagged) {
       const turn = state.game.turn();
       setAwaiting(turn !== sp.playerSide ? turn : null);
@@ -433,11 +411,14 @@ export function createStore(opts = {}) {
   function afterSelfPlayMove() {
     const sp = state.selfPlay;
     if (!sp.on) return;
+
     const over = gameOver() || !!state.clock.flagged;
+
     if (sp.opponent === 'self') {
       if (state.settings.selfPlay.autoFlip && !over) actions.setOrientation(state.game.turn());
       return;
     }
+
     applyOpponentDelegation();
   }
 
@@ -452,12 +433,14 @@ export function createStore(opts = {}) {
   function primeEngineFromNode(node) {
     const e = state.engine;
     const ev = node.eval;
+
     if (ev && (typeof ev.cp === 'number' || typeof ev.mate === 'number')) {
       const score = typeof ev.mate === 'number' ? { mate: ev.mate } : { cp: ev.cp };
       const pv = Array.isArray(ev.pv) ? [...ev.pv] : [];
-      // A stored pv can come from a hand-edited YAML / an AI annotation: only trust it when it replays
-      // in this position (pvToSan stops at the first illegal move, so an empty result means pv[0] is bogus).
+
+      // Trust a stored pv only when it replays here.
       const san = pv.length ? state.game.pvToSan(pv) : [];
+
       e.score = score;
       e.depth = ev.depth || 0;
       e.bestMove = san.length ? pv[0] : null;
@@ -468,6 +451,7 @@ export function createStore(opts = {}) {
       e.bestMove = null;
       e.lines = [];
     }
+
     emit('engine:update', { engine: e });
   }
 
@@ -476,20 +460,21 @@ export function createStore(opts = {}) {
     const payload = { game, current: game.current, reason };
     if (move) payload.move = move;
     emit('game:change', payload);
+
     const fen = game.fen();
+
+    // Prime on the node, not the fen: a same-fen load swaps in a fresh node without an eval.
     if (game.current !== lastNode) {
-      // Prime on the NODE, not on the fen: a same-fen load (loadFen of the current position, a setup
-      // commit that changed nothing) swaps in a fresh node whose eval is null, and the engine block
-      // must follow it or the eval bar shows a score no export contains.
       lastNode = game.current;
       primeEngineFromNode(game.current);
     }
+
     if (fen !== lastFen) {
       lastFen = fen;
       emit('position:change', { fen, turn: game.turn(), node: game.current });
     }
-    // Clear the selection AFTER the game/position events. Listeners key "deselected while a promotion
-    // is pending" on a cancelled promotion picker; completing one must deliver game:change first.
+
+    // Last, so a completed promotion is not read as a cancelled one.
     clearSelection();
     scheduleAutosave();
   }
@@ -511,14 +496,17 @@ export function createStore(opts = {}) {
     state.game = st.game;
     state.study = { title: st.title || '', created: st.created || today(), notes: st.notes || '' };
     leaveSetup();
+
     if (st.orientation && st.orientation !== state.orientation) {
       state.orientation = st.orientation;
       emit('orientation:change', { orientation: state.orientation });
     }
+
     emit('study:change', { study: state.study });
     afterGameChange(reason);
     resetClockForNewGame();
     if (state.selfPlay.on) applyOpponentDelegation();
+
     if (st.warnings && st.warnings.length) {
       toast(`${st.warnings.length} move(s) dropped on import: ${st.warnings[0]}`, 'error');
     }
@@ -532,12 +520,11 @@ export function createStore(opts = {}) {
   }
 
   function setupFromGame() {
-    // Carry the whole FEN state across, not just the board: dropping the en-passant square removes a
-    // legal capture and dropping the clocks restarts the move number / fifty-move counter, so
-    // setup → commit with no edits would silently change the position.
+    // Carry the whole FEN state, so setup then commit with no edits changes nothing.
     const [, , castling, ep, half, full] = state.game.fen().split(' ');
     const halfmoves = Number.parseInt(half, 10);
     const fullmoves = Number.parseInt(full, 10);
+
     return {
       pieces: state.game.pieces(),
       turn: state.game.turn(),
@@ -558,10 +545,10 @@ export function createStore(opts = {}) {
   }
 
   function syncAiProvider() {
-    // state.ai.provider is a mirror of settings.ai.provider (the panel reads one, the chat router the
-    // other): the store owns the mirror so a reset cannot leave the two disagreeing.
+    // state.ai.provider mirrors settings.ai.provider; owning the mirror keeps a reset consistent.
     const next = (state.settings.ai && state.settings.ai.provider) || 'packet';
     if (state.ai.provider === next) return;
+
     state.ai.provider = next;
     emit('ai:update', { ai: state.ai });
   }
@@ -569,6 +556,7 @@ export function createStore(opts = {}) {
   function syncViewMode() {
     const next = state.settings.viewMode === '2d' ? '2d' : '3d';
     if (state.viewMode === next) return;
+
     const previous = state.viewMode;
     state.viewMode = next;
     emit('viewmode:change', { mode: next, previous });
@@ -577,15 +565,19 @@ export function createStore(opts = {}) {
   function syncSelfPlaySettings() {
     const want = state.settings.selfPlay || {};
     const opponent = OPPONENTS.has(want.opponent) ? want.opponent : 'self';
+
     if (state.selfPlay.opponent !== opponent) {
       state.selfPlay.opponent = opponent;
       emitSelfPlay();
       if (state.selfPlay.on) applyOpponentDelegation();
     }
-    // Only adopt a new time control on an idle clock — never wipe a running or half-played one.
+
+    // Only an idle clock adopts a new time control.
     if (clockIsRunning(state.clock) || state.clock.turn || state.clock.flagged) return;
+
     const tc = normalizeTimeControl(want.timeControl);
     if (tc.initial === state.clock.initial && tc.increment === state.clock.increment) return;
+
     if (applyClock(createClock(tc))) {
       emitClockChange();
       syncTicker();
@@ -606,15 +598,17 @@ export function createStore(opts = {}) {
     const w = game.headers.get('White');
     const b = game.headers.get('Black');
     const ev = game.headers.get('Event');
+
     if (w && b && w !== '?' && b !== '?') return `${w} - ${b}`;
     if (ev && ev !== '?') return ev;
     return '';
   }
 
-  // ───────── actions ─────────
+  // Actions
 
   const actions = {
-    // game
+    // Game
+
     /** Fresh standard game and a fresh study. */
     newGame() {
       state.game = Game.standard();
@@ -624,7 +618,8 @@ export function createStore(opts = {}) {
       resetClockForNewGame();
       if (state.selfPlay.on) applyOpponentDelegation();
     },
-    /** Fresh Chess960 game (n in 0..959, undefined = random); returns the number. */
+
+    /** Fresh Chess960 game, n in 0..959 or random; returns the number. */
     newChess960(n) {
       state.game = Game.chess960(Number.isInteger(n) ? n : undefined);
       resetStudy();
@@ -634,40 +629,47 @@ export function createStore(opts = {}) {
       if (state.selfPlay.on) applyOpponentDelegation();
       return state.game.chess960Number;
     },
-    /** Load a FEN as a fresh study; false + toast when invalid. */
+
+    /** False and a toast when invalid. */
     loadFen(fen) {
       let game;
+
       try {
         game = Game.fromFen(fen);
       } catch (e) {
         toast(`FEN: ${e.message}`, 'error');
         return false;
       }
+
       applyStudy({ title: '', created: today(), notes: '', orientation: state.orientation, game }, 'load');
       return true;
     },
-    /** Load a PGN (first game) as a fresh study; false + toast when invalid. */
+
+    /** False and a toast when invalid. */
     loadPgn(text) {
       let game;
+
       try {
         game = Game.fromPgn(text);
       } catch (e) {
         toast(`PGN: ${e.message}`, 'error');
         return false;
       }
-      // chessops happily parses prose, a bare FEN, JSON or a YAML study into a game with zero moves and
-      // nothing but default headers. Loading that would wipe the current study (and the autosave 300 ms
-      // later) with no warning, so refuse anything that carries neither a move nor real header data.
+
+      // chessops parses almost any text into an empty game; refuse one with no moves and no real headers.
       if (!game.hasMoves() && ![...game.headers].some(([, v]) => !PGN_DEFAULT_HEADER_VALUES.has(v))) {
         toast('PGN: no moves or headers found', 'error');
         return false;
       }
+
       applyStudy({ title: pgnTitle(game), created: today(), notes: '', orientation: state.orientation, game, warnings: game.warnings }, 'load');
       return true;
     },
-    /** Load a study object ({ title, created, notes, orientation, game }); `game` may be a Game or its JSON. */
+
+    /** `game` may be a Game or its JSON. */
     loadStudy(studyObj) {
       let st;
+
       try {
         if (!studyObj || typeof studyObj !== 'object') throw new Error('not a study');
         st = studyObj.game instanceof Game ? { ...studyObj, warnings: studyObj.game.warnings } : studyFromJSON(studyObj);
@@ -675,46 +677,59 @@ export function createStore(opts = {}) {
         toast(`Study: ${e.message}`, 'error');
         return false;
       }
+
       applyStudy(st, 'load');
       return true;
     },
-    /** Load a YAML study; false + toast when invalid. */
+
+    /** False and a toast when invalid. */
     loadYaml(text) {
       let st;
+
       try {
         st = studyFromYaml(text);
       } catch (e) {
         toast(`YAML: ${e.message}`, 'error');
         return false;
       }
+
       applyStudy(st, 'load');
       return true;
     },
-    /** Try a from→to from the board: 'played' | 'promotion' (emits promotion:required) | 'illegal'. */
+
+    /** A from-to from the board: 'played', 'promotion' (emits promotion:required) or 'illegal'. */
     attemptMove(a, b) {
       const from = typeof a === 'string' ? a : a && a.from;
       const to = typeof a === 'string' ? b : a && a.to;
       if (state.mode !== 'play' || !from || !to) return 'illegal';
+
       const game = state.game;
       const piece = game.pieceAt(from);
       if (!piece) return 'illegal';
+
       const inTargets = game.legalTargets(from).includes(to);
       if (!inTargets && !game.isLegal({ from, to })) return 'illegal';
+
       const lastRank = to[1] === '8' || to[1] === '1';
+
       if (piece.role === 'pawn' && lastRank) {
         emit('promotion:required', { from, to });
         return 'promotion';
       }
+
       return actions.playMove({ from, to }) ? 'played' : 'illegal';
     },
-    /** Play a move ({from,to,promotion?} or UCI); null + toast when illegal. */
+
+    /** A move object or UCI; null and a toast when illegal. */
     playMove(move) {
       if (state.mode !== 'play') {
         toast('Leave setup mode to play moves', 'error');
         return null;
       }
+
       const mover = state.game.turn();
       let res;
+
       try {
         res = state.game.play(move);
       } catch (e) {
@@ -722,281 +737,333 @@ export function createStore(opts = {}) {
         toast(`Illegal move: ${text}`, 'error');
         return null;
       }
+
       afterGameChange('move', res);
-      // Only a played move touches the clock (navigation never does), and only after the game events
-      // so a listener that repaints on game:change already has the new position when the clock moves.
+
+      // After the game events, so a repaint on game:change already has the new position.
       clockOnMove(mover);
       afterSelfPlayMove();
       return res.node;
     },
-    /** Play a SAN move; null + toast when illegal. */
+
+    /** Null and a toast when illegal. */
     playSan(san) {
       const m = state.game.sanToMove(san);
+
       if (!m) {
         toast(`Illegal move: ${san}`, 'error');
         return null;
       }
+
       return actions.playMove(m);
     },
-    /** Jump to a node. */
+
     goto(nodeId) {
       return navigate('goto', () => state.game.goto(nodeId));
     },
-    /** One move back. */
+
     back() {
       return navigate('goto', () => state.game.back());
     },
-    /** One move forward along children[0]. */
+
     forward() {
       return navigate('goto', () => state.game.forward());
     },
-    /** To the root. */
+
     toStart() {
       return navigate('goto', () => state.game.toStart());
     },
-    /** To the end of the current line. */
+
     toEnd() {
       return navigate('goto', () => state.game.toEnd());
     },
-    /** Next sibling variation. */
+
     nextVariation() {
       return navigate('goto', () => state.game.nextVariation());
     },
-    /** Previous sibling variation. */
+
     prevVariation() {
       return navigate('goto', () => state.game.prevVariation());
     },
-    /** Make a node children[0] of its parent. */
+
     promoteVariation(id) {
       state.game.promoteVariation(id);
       afterGameChange('promote');
     },
-    /** Promote a node all the way to the main line. */
+
     makeMainline(id) {
       state.game.makeMainline(id);
       afterGameChange('promote');
     },
-    /** Delete a subtree (current moves to the parent). */
+
     deleteFrom(id) {
       state.game.deleteFrom(id);
       afterGameChange('delete');
     },
-    /** Select a square (null clears); legal targets computed for it. */
+
+    /** Select a square, or clear with null. */
     select(square) {
       const sq = square || null;
       const targets = sq && state.mode === 'play' ? state.game.legalTargets(sq) : [];
       if (sq === state.selected && sameList(targets, state.legalTargets)) return;
+
       state.selected = sq;
       state.legalTargets = targets;
       emit('selection:change', { selected: sq, legalTargets: [...targets] });
     },
-    /** Switch between 'play' and 'setup' (setup scratch initialised from the current position). */
+
+    /** 'play' or 'setup'; the setup scratch starts from the current position. */
     setMode(mode) {
       if ((mode !== 'play' && mode !== 'setup') || mode === state.mode) return;
+
       state.setup = mode === 'setup' ? setupFromGame() : null;
       state.mode = mode;
       clearSelection();
       emit('mode:change', { mode });
-      // Cancelling setup (setup → play without a commit) leaves the position untouched, but the engine
-      // module blanks its block on mode:change → setup. Re-prime from the node so a stored eval comes back.
+
+      // The engine blanks its block on setup; a cancelled setup re-primes the stored eval.
       if (mode === 'play') primeEngineFromNode(state.game.current);
     },
-    /** Flip the board orientation. */
+
     flip() {
       actions.setOrientation(state.orientation === 'white' ? 'black' : 'white');
     },
-    /** Set the board orientation. */
+
     setOrientation(c) {
       if ((c !== 'white' && c !== 'black') || c === state.orientation) return;
+
       state.orientation = c;
       emit('orientation:change', { orientation: c });
       scheduleAutosave();
     },
-    // view mode
-    /** Switch between the 3D board and the locked top-down 2D board; persists + emits viewmode:change. */
+
+    // View mode
+
+    /** The 3D board or the locked top-down 2D board. */
     setViewMode(mode) {
       if (!VIEW_MODES.has(mode) || state.viewMode === mode) return false;
+
       const previous = state.viewMode;
       state.viewMode = mode;
-      // Persist first so a listener that re-reads settings during viewmode:change sees the new value.
+
+      // Persist first so a listener that re-reads settings sees the new value.
       actions.setSetting('viewMode', mode);
       emit('viewmode:change', { mode, previous });
       return true;
     },
-    /** 2D <-> 3D. */
+
     toggleViewMode() {
       return actions.setViewMode(state.viewMode === '2d' ? '3d' : '2d');
     },
-    // self-play
-    /**
-     * Start self-play. opts: { opponent?, timeControl?, rotate?, autoFlip?, playAs? }.
-     * Resets and starts the clock (untimed time controls simply never run) and points the chosen
-     * opponent at the side the person is not playing. Both sides stay movable by hand, always.
-     */
+
+    // Self-play
+
+    /** opts: { opponent?, timeControl?, rotate?, autoFlip?, playAs? }. Both sides stay hand-movable. */
     startSelfPlay(opts) {
       const o = opts && typeof opts === 'object' ? opts : {};
+
       if (state.mode !== 'play') {
         toast('Leave setup mode to start self-play', 'error');
         return false;
       }
+
       if (OPPONENTS.has(o.opponent)) actions.setSetting('selfPlay.opponent', o.opponent);
       if (o.timeControl !== undefined) actions.setSetting('selfPlay.timeControl', normalizeTimeControl(o.timeControl));
       if (typeof o.rotate === 'boolean') actions.setSetting('selfPlay.rotate', o.rotate);
       if (typeof o.autoFlip === 'boolean') actions.setSetting('selfPlay.autoFlip', o.autoFlip);
+
       state.selfPlay.on = true;
       state.selfPlay.opponent = OPPONENTS.has(state.settings.selfPlay.opponent) ? state.settings.selfPlay.opponent : 'self';
       state.selfPlay.playerSide = isColor(o.playAs) ? o.playAs : state.orientation;
       state.selfPlay.awaiting = null;
+
       const fresh = clockStartPure(createClock(state.settings.selfPlay.timeControl), state.game.turn(), now());
+
       if (applyClock(fresh)) {
         emitClockChange();
         syncTicker();
       }
+
       emitSelfPlay();
       applyOpponentDelegation();
       return true;
     },
-    /** Stop self-play: the clock pauses, the delegation is dropped, the game and tree are untouched. */
+
+    /** The clock pauses and the delegation drops; the game is untouched. */
     stopSelfPlay() {
       if (!state.selfPlay.on) return false;
+
       state.selfPlay.on = false;
       state.selfPlay.awaiting = null;
+
       const paused = clockPausePure(state.clock, now());
       if (applyClock(paused)) emitClockChange();
       stopTicker();
+
       emitSelfPlay();
       applyOpponentDelegation();
       return true;
     },
-    /** 'self' | 'engine' | 'ai'; persists and re-points the delegation when self-play is running. */
+
+    /** 'self' | 'engine' | 'ai'. */
     setSelfPlayOpponent(id) {
       if (!OPPONENTS.has(id)) return false;
+
       if (state.settings.selfPlay.opponent !== id) actions.setSetting('selfPlay.opponent', id);
+
       if (state.selfPlay.opponent !== id) {
         state.selfPlay.opponent = id;
         emitSelfPlay();
       }
+
       if (state.selfPlay.on) applyOpponentDelegation();
       return true;
     },
-    /** The MCP bridge / AI answers an awaiting request (or gives up): clears selfPlay.awaiting. */
+
     clearSelfPlayAwaiting() {
       return setAwaiting(null);
     },
-    /** The integrator hands the store the engine instance so self-play can call engine.setPlayAs. */
+
+    /** The engine instance self-play delegates to. */
     registerEngine(engine) {
       engineController = engine && typeof engine.setPlayAs === 'function' ? engine : null;
+
       if (state.selfPlay.on && engineDelegatedColor) {
-        engineDelegatedColor = null;                       // re-send to the newly registered engine
+        engineDelegatedColor = null; // re-send to the newly registered engine
         applyOpponentDelegation();
       }
     },
-    // clock
-    /** Set { initial, increment } in ms (initial 0 = untimed); refused while the clock runs. */
+
+    // Clock
+
+    /** { initial, increment } in ms, initial 0 untimed; refused while the clock runs. */
     setTimeControl(tc) {
       if (clockIsRunning(state.clock)) {
         toast('Pause the clock before changing the time control', 'error');
         return false;
       }
+
       const next = normalizeTimeControl(tc);
       actions.setSetting('selfPlay.timeControl', next);
+
       if (applyClock(createClock(next))) {
         emitClockChange();
         syncTicker();
       }
+
       return true;
     },
-    /** Start the clock on `color` (default: the side to move). Untimed clocks never start. */
+
+    /** Start on `color`, default the side to move. */
     clockStart(color) {
       if (clockIsUntimed(state.clock) || state.clock.flagged) return false;
+
       const turn = isColor(color) ? color : state.game.turn();
+
       if (applyClock(clockStartPure(state.clock, turn, now()))) {
         emitClockChange();
         syncTicker();
       }
+
       return clockIsRunning(state.clock);
     },
-    /** Stop burning time, keeping both readouts and whose turn it is. */
+
     clockPause() {
       if (!clockIsRunning(state.clock)) return false;
+
       applyClock(clockPausePure(state.clock, now()));
       stopTicker();
       emitClockChange();
       return true;
     },
-    /** Resume a paused clock for the side it was paused on. */
+
     clockResume() {
       if (clockIsRunning(state.clock) || clockIsUntimed(state.clock) || state.clock.flagged) return false;
       if (!applyClock(clockResumePure(state.clock, now()))) return false;
+
       emitClockChange();
       syncTicker();
       return true;
     },
-    /** Both sides back to the time control; the flag and the turn are cleared. */
+
     clockReset(tc) {
       const control = tc === undefined ? { initial: state.clock.initial, increment: state.clock.increment } : normalizeTimeControl(tc);
       if (tc !== undefined) actions.setSetting('selfPlay.timeControl', control);
+
       stopTicker();
+
       if (applyClock(clockResetPure(state.clock, control))) {
         emitClockChange();
         syncTicker();
       }
+
       return true;
     },
-    /**
-     * `color` ran out of time. Flags once, stops the clock, toasts and ends the self-play delegation.
-     * The rules are untouched: game.status() still reports the position, never a fake checkmate.
-     */
+
+    /** Flags once; the rules are untouched, so status() never reports a fake checkmate. */
     clockFlag(color) {
       if (!isColor(color) || state.clock.flagged || clockIsUntimed(state.clock)) return false;
       if (!applyClock(clockFlagPure(state.clock, color))) return false;
+
       stopTicker();
       emitClockChange();
       toast(`${capitalise(color)} lost on time`, 'info');
       applyOpponentDelegation();
       return true;
     },
-    // setup mode
-    /** Place (or remove with null) a piece on the setup board. */
+
+    // Setup mode
+
+    /** Place a piece, or remove with null. */
     setupPlace(square, piece) {
       if (state.mode !== 'setup' || !state.setup || typeof square !== 'string') return false;
+
       const list = state.setup.pieces.filter(p => p.square !== square);
       if (piece && piece.role && piece.color) list.push({ square, piece: { color: piece.color, role: piece.role } });
+
       state.setup.pieces = list;
       setupChanged();
       return true;
     },
-    /** Empty the setup board. */
+
     setupClear() {
       if (state.mode !== 'setup' || !state.setup) return;
+
       state.setup.pieces = [];
       state.setup.castling = '-';
       setupChanged();
     },
-    /** Reset the setup board to the standard start. */
+
     setupStart() {
       if (state.mode !== 'setup' || !state.setup) return;
+
       state.setup.pieces = Game.standard().pieces();
       state.setup.turn = 'white';
       state.setup.castling = 'KQkq';
       setupChanged();
     },
-    /** Side to move in the setup scratch. */
+
     setupTurn(color) {
       if (state.mode !== 'setup' || !state.setup || (color !== 'white' && color !== 'black')) return;
+
       state.setup.turn = color;
       setupChanged();
     },
-    /** Castling rights string ('KQkq', 'Kq', '-', or X-FEN letters). */
+
+    /** 'KQkq', 'Kq', '-', or X-FEN letters. */
     setupCastling(str) {
       if (state.mode !== 'setup' || !state.setup) return;
+
       state.setup.castling = typeof str === 'string' && str.trim() ? str.trim() : '-';
       setupChanged();
     },
-    /** Build the game from the setup scratch and return to play mode. Toast + throw when illegal. */
+
+    /** Build the game and return to play mode; toasts and throws when illegal. */
     setupCommit() {
       if (state.mode !== 'setup' || !state.setup) throw new Error('not in setup mode');
+
       let game;
+
       try {
         game = Game.fromPieces(state.setup.pieces, {
           turn: state.setup.turn,
@@ -1009,6 +1076,7 @@ export function createStore(opts = {}) {
         toast(`Setup: ${e.message}`, 'error');
         throw e;
       }
+
       state.game = game;
       state.setup = null;
       state.mode = 'play';
@@ -1016,182 +1084,218 @@ export function createStore(opts = {}) {
       afterGameChange('setup');
       return true;
     },
-    // annotations (current node)
-    /** Toggle an arrow on the current node; true when added. */
+
+    // Annotations on the current node
+
+    /** True when added. */
     toggleArrow(arrow) {
       const added = state.game.toggleArrow(state.game.current.id, arrow);
       emitAnnotations();
       return added;
     },
-    /** Toggle / recolour a highlight on the current node; true when present afterwards. */
+
+    /** True when present afterwards. */
     toggleHighlight(square, color) {
       const on = state.game.toggleHighlight(state.game.current.id, square, color);
       emitAnnotations();
       return on;
     },
-    /** Add arrows (same from/to replaces), tagged with a source ('user' | 'engine' | 'ai'). */
+
+    /** Same from/to replaces; tagged with a source. */
     addArrows(arrows, source) {
       const node = state.game.current;
       const incoming = (arrows || []).filter(a => a && a.from && a.to).map(a => ({ ...a, source: source || a.source || 'user' }));
       const kept = node.arrows.filter(x => !incoming.some(a => a.from === x.from && a.to === x.to));
+
       state.game.setArrows(node.id, [...kept, ...incoming]);
       emitAnnotations();
     },
-    /** Replace the highlights of the current node. */
+
     setHighlights(list) {
       state.game.setHighlights(state.game.current.id, list || []);
       emitAnnotations();
     },
-    /** Clear arrows / highlights / notes on the current node (defaults: arrows + highlights). */
+
+    /** Defaults to arrows and highlights. */
     clearAnnotations(what) {
       const o = { arrows: true, highlights: true, notes: false, ...(what || {}) };
       const node = state.game.current;
+
       if (o.arrows) state.game.setArrows(node.id, []);
       if (o.highlights) state.game.setHighlights(node.id, []);
+
       if (o.notes) {
         state.game.setNote(node.id, '');
         state.game.setNag(node.id, '');
       }
+
       emitAnnotations();
       if (o.notes) emit('game:change', { game: state.game, current: node, reason: 'note' });
     },
-    /** Note on the current node. */
+
     setNote(text) {
       const node = state.game.current;
       state.game.setNote(node.id, text);
       emitAnnotations();
       emit('game:change', { game: state.game, current: node, reason: 'note' });
     },
-    /** NAG glyph on the current node. */
+
     setNag(nag) {
       const node = state.game.current;
       state.game.setNag(node.id, nag);
       emitAnnotations();
       emit('game:change', { game: state.game, current: node, reason: 'note' });
     },
-    /** Study-level notes. */
+
     setStudyNotes(text) {
       state.study.notes = typeof text === 'string' ? text : '';
       emit('study:change', { study: state.study });
       scheduleAutosave();
     },
-    /** Study title. */
+
     setStudyTitle(text) {
       state.study.title = typeof text === 'string' ? text : '';
       emit('study:change', { study: state.study });
       scheduleAutosave();
     },
-    // settings
-    /** Set a setting by dotted path, persist, emit settings:change { path, value, settings }. */
+
+    // Settings
+
+    /** Set by dotted path, persist, emit settings:change. */
     setSetting(path, value) {
       if (typeof path !== 'string' || !path) return;
+
       const v = path === 'quality' ? normalizeQuality(value) : clone(value);
       setPath(state.settings, path, v);
       saveSettings();
       emit('settings:change', { path, value: v, settings: state.settings });
-      // The mirrors (ai.provider, viewMode, selfPlay.opponent, an idle clock's time control) follow
-      // whatever path was written — a panel may set 'selfPlay', 'selfPlay.opponent' or the whole blob.
+
+      // The mirrors follow whatever path was written, whole blob or leaf.
       syncFromSettings();
     },
-    /** Back to defaults (one settings:change per top-level key). */
+
+    /** One settings:change per top-level key. */
     resetSettings() {
       state.settings = defaultSettings();
       storageRemove(storage, STORAGE_KEYS.settings);
+
       for (const key of Object.keys(state.settings)) {
         emit('settings:change', { path: key, value: state.settings[key], settings: state.settings });
       }
+
       syncFromSettings();
     },
-    // engine
-    /** Patch engine status fields (available / enabled / thinking / depth / nodes / nps …). */
+
+    // Engine
+
     engineStatus(patch) {
       Object.assign(state.engine, patch || {});
       emit('engine:update', { engine: state.engine });
     },
-    /** New engine lines for the current position (White's view). Stores the top line as the node's eval. */
+
+    /** Lines in White's view; the top line becomes the node's eval, never at a lower depth. */
     engineLines(lines, score, depth, bestMove, fen) {
       const game = state.game;
       if (fen && fen !== game.fen()) return;
+
       const e = state.engine;
       e.lines = Array.isArray(lines) ? lines : [];
       e.score = score === undefined ? e.score : score;
       if (Number.isFinite(depth)) e.depth = depth;
       e.bestMove = bestMove === undefined ? e.bestMove : bestMove;
+
       if (state.mode === 'play' && e.lines.length && Number.isFinite(depth) && depth > 0) {
         const node = game.current;
         const top = e.lines[0];
         const prev = node.eval;
+
         if (!prev || (prev.depth || 0) <= depth) {
           const sc = top.score || score;
+
           if (sc && (typeof sc.cp === 'number' || typeof sc.mate === 'number')) {
             const ev = { depth, pv: Array.isArray(top.pv) ? [...top.pv] : [] };
             if (typeof sc.mate === 'number') ev.mate = sc.mate;
             else ev.cp = sc.cp;
+
             const best = (Array.isArray(top.san) && top.san[0]) || (ev.pv[0] ? game.pvToSan([ev.pv[0]])[0] : undefined);
             if (best) ev.best = best;
+
             game.setEval(node.id, ev);
-            // The eval is persisted state like any annotation; without this a crash mid-analysis loses
-            // every eval since the last move. scheduleAutosave is debounced, so a stream just resets it.
+
+            // Evals are persisted like annotations; the debounce absorbs a stream.
             scheduleAutosave();
           }
         }
       }
+
       emit('engine:update', { engine: e });
     },
-    /** Which colour the engine plays (null = analysis only). */
+
+    /** null is analysis only. */
     engineSetPlayAs(color) {
       state.engine.playAs = color === 'white' || color === 'black' ? color : null;
       emit('engine:update', { engine: state.engine });
     },
-    // ai
-    /** Append a chat message { role, text, at }. */
+
+    // AI
+
+    /** Append { role, text, at }. */
     aiMessage(msg) {
       const m = typeof msg === 'string' ? { role: 'assistant', text: msg } : msg || {};
+
       state.ai.messages.push({
         role: m.role === 'user' || m.role === 'system' ? m.role : 'assistant',
         text: String(m.text === undefined ? '' : m.text),
         at: m.at || new Date().toISOString(),
       });
+
       if (state.ai.messages.length > 200) state.ai.messages.splice(0, state.ai.messages.length - 200);
       emit('ai:update', { ai: state.ai });
     },
-    /** AI busy flag. */
+
     aiBusy(bool) {
       state.ai.busy = !!bool;
       emit('ai:update', { ai: state.ai });
     },
-    /** AI error text (also clears busy). */
+
+    /** Also clears busy. */
     aiError(text) {
       state.ai.lastError = text ? String(text) : null;
       state.ai.busy = false;
       emit('ai:update', { ai: state.ai });
     },
-    /** Clear the chat log and error. */
+
     aiClear() {
       state.ai.messages = [];
       state.ai.lastError = null;
       emit('ai:update', { ai: state.ai });
     },
-    // ui
-    /** Active side panel. */
+
+    // UI
+
     setPanel(name) {
       if (!PANELS.has(name) || state.ui.panel === name) return;
+
       state.ui.panel = name;
       emit('ui:change', { ui: state.ui });
     },
-    /** Collapse / expand the side panel. */
+
     toggleCollapsed() {
       state.ui.collapsed = !state.ui.collapsed;
       emit('ui:change', { ui: state.ui });
     },
-    // persistence
-    /** Write the study to storage now (also runs debounced after every game change). */
+
+    // Persistence
+
+    /** Write the study now; also runs debounced after every game change. */
     autosave() {
       if (autosaveTimer) {
         clearTimeout(autosaveTimer);
         autosaveTimer = null;
       }
+
       if (!storage) return false;
+
       try {
         const obj = studyToJSON({ ...state.study, orientation: state.orientation, game: state.game });
         return storageSet(storage, STORAGE_KEYS.study, JSON.stringify(obj));
@@ -1199,10 +1303,12 @@ export function createStore(opts = {}) {
         return false;
       }
     },
-    /** Restore the autosaved study; true when something was restored. */
+
+    /** True when something was restored. */
     restore() {
       const raw = storageGet(storage, STORAGE_KEYS.study);
       if (!raw) return false;
+
       try {
         const st = studyFromJSON(JSON.parse(raw));
         applyStudy(st, 'load');
@@ -1212,7 +1318,7 @@ export function createStore(opts = {}) {
         return false;
       }
     },
-    /** Emit a toast { text, kind }. */
+
     toast(text, kind) {
       toast(text, kind);
     },
@@ -1224,8 +1330,8 @@ export function createStore(opts = {}) {
     off,
     emit,
     actions,
-    /** Advance the clock to now() and emit 'clock:tick' (the 200 ms ticker calls this; tests pump it). */
     tickClock,
+
     /** Clear pending timers (tests). */
     dispose() {
       if (autosaveTimer) clearTimeout(autosaveTimer);
@@ -1235,10 +1341,9 @@ export function createStore(opts = {}) {
       listeners.clear();
     },
   };
+
   return store;
 }
 
-/** The application store. */
 export const store = createStore();
-/** Actions bound to the singleton store. */
 export const actions = store.actions;

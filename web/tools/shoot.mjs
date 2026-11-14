@@ -1,52 +1,15 @@
-// tools/shoot.mjs -- screenshot the board from named camera angles in headless Chrome (GPU, throwaway profile).
-//
-//   node tools/shoot.mjs --set classic --out ./shots [--views white,low,close-king] [--fen "<FEN>"]
-//                        [--theme wood] [--size 1600x1000] [--ui] [--url http://127.0.0.1:8150/]
-//
-// A fresh --user-data-dir per run, so nothing touches the board you actually play on (its localStorage lives in
-// a different profile). The page must be served (preview "chessboard" on 8150 serves app/dist/). Views:
-//   white, black, side, top          the board's own presets
-//   low                              a low three-quarter view from White's side (the "hero" angle)
-//   low-black                        the same from Black's side
-//   close-king, close-queen, close-knight, close-bishop, close-rook, close-pawn
-//                                    tight shots on White's pieces of that role (e1, d1, g1, c1, h1, e2),
-//                                    turned to face the carved side
-//   close-black-knight               Black's g8 knight from White's side (its face)
-//   close-black-<role>               Black's king/queen/knight/bishop/rook/pawn (e8, d8, b8, f8, a8, d7) from White's side
-//   orbit-<deg>                      the low view turned <deg> degrees around the board
-//   piece-<square>-<deg>             around one piece, 3 units out and 1 up, <deg> from White's side (0 = from +z)
-//   close-coords                     a tight look along White's near edge at the file letters and the inlay
-//   under                            far and low from White's right, just over the table top: the rim, the
-//                                    apron and the pedestal under it
-//   corner-a1                        close on the frame's a1 corner (the mitre joint, the stringing, the gilt)
-//   far                              far off White's right and looking down past the table: its foot and the floor
-//   2d                               the flat 2D mode (switches back to 3D afterwards)
-// Stage-only captures by default (the side panel and toolbar hidden, canvas full-window, the 3D vignette kept);
-// --ui keeps the app chrome.
-//   --lighting off                   capture with the lighting master switch off (the unlit look)
-//   --env room|studio|plain          where the board sits (settings.environment; default: the app's own)
-//   --js <file>                      evaluate a snippet in the page after setup, before the views (tuning
-//                                    experiments: it can reach everything through window.__chessboard)
-//   --flip                           flip the board to Black's seat first (Flip, as the app does it), so the
-//                                    black / low-black views see the coordinates and glyphs oriented for Black
-//   --mask                           after each view, also write <prefix>-<view>-mask.png from the same camera: an
-//                                    object-ID render (light squares red, dark squares dark red, frame + stringing
-//                                    yellow, table green, White's pieces blue, Black's cyan, coordinate glyphs
-//                                    magenta, everything else black), and <prefix>-<view>-geo.json: every square's
-//                                    projected corners and the screen boxes of the back rank farthest from the
-//                                    camera. tools/clipcheck.mjs and tools/readability.mjs read them.
-//   --normals                        after each view, also write <prefix>-<view>-normals.png: the pieces' world-space
-//                                    geometric normals (rgb = n * 0.5 + 0.5, no normal maps), everything else black;
-//                                    tools/facecheck.mjs reads it (with --mask) to compare flat tops with side faces
-// Prints one line per file written. Exit code 1 if the set never finished loading.
-
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const args = process.argv.slice(2);
-const opt = (name, dflt) => { const i = args.indexOf('--' + name); return i >= 0 && i + 1 < args.length ? args[i + 1] : dflt; };
+
+const opt = (name, dflt) => {
+  const i = args.indexOf('--' + name);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : dflt;
+};
+
 const flag = (name) => args.includes('--' + name);
 
 const CHROME = opt('chrome', 'C:/Program Files/Google/Chrome/Application/chrome.exe');
@@ -67,7 +30,7 @@ const FLIP = flag('flip');
 const ENV = opt('env', null);
 const JS = opt('js', null);
 
-// The object-ID pass: flat unlit colours per part of the scene, black background, no vignette. Restored afterwards.
+// Object-ID pass: flat unlit colour per part of the scene. MASK_OFF restores it.
 const MASK_ON = `(async () => {
   const cb = window.__chessboard, view = cb.view, scene = view.scene;
   let Basic = null;
@@ -102,6 +65,7 @@ const MASK_ON = `(async () => {
   view.render();
   return true;
 })()`;
+
 const MASK_OFF = `(async () => {
   const cb = window.__chessboard, view = cb.view, { saved, mats } = window.__maskSaved;
   view.effects = true;
@@ -116,8 +80,7 @@ const MASK_OFF = `(async () => {
   return true;
 })()`;
 
-// The normals pass: every piece drawn with its world-space geometric normal as its colour (after the colour-space
-// step, so the bytes are the encoding), everything else hidden. Restored by MASK_OFF (same bookkeeping).
+// Normals pass: pieces coloured by world-space geometric normal. Restored by MASK_OFF.
 const NORMALS_ON = `(async () => {
   const cb = window.__chessboard, view = cb.view, scene = view.scene;
   let Basic = null;
@@ -151,8 +114,7 @@ const NORMALS_ON = `(async () => {
   return true;
 })()`;
 
-// Geometry for the analysis tools, from the camera of the shot: squares as projected quads, and the back rank
-// farthest from the camera as screen boxes (the contact decal left out, so the box is the piece).
+// Squares as projected quads and the far back rank as screen boxes, from the shot's camera.
 const GEO = `(() => {
   const cb = window.__chessboard, view = cb.view, cam = view.camera, T = cam.position.constructor;
   const px = (x, y, z) => { const c = view.worldToClient({ x, y, z }); return c ? [Math.round(c.x * 10) / 10, Math.round(c.y * 10) / 10] : null; };
@@ -187,6 +149,7 @@ const GEO = `(() => {
 })()`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 mkdirSync(OUT, { recursive: true });
 const profile = mkdtempSync(join(tmpdir(), 'cbshot-'));
 const chrome = spawn(CHROME, [
@@ -198,29 +161,46 @@ const chrome = spawn(CHROME, [
 let ws;
 let exitCode = 0;
 const logs = [];
+
 try {
   for (let i = 0; i < 100 && !ws; i++) {
     try {
       const list = await (await fetch(`http://127.0.0.1:${PORT}/json`)).json();
       const page = list.find((t) => t.type === 'page');
       if (page) ws = new WebSocket(page.webSocketDebuggerUrl);
-    } catch { /* not up yet */ }
+    } catch {}
+
     if (!ws) await sleep(150);
   }
+
   if (!ws) throw new Error('Chrome did not start');
-  await new Promise((r, j) => { ws.addEventListener('open', r, { once: true }); ws.addEventListener('error', j, { once: true }); });
+
+  await new Promise((r, j) => {
+    ws.addEventListener('open', r, { once: true });
+    ws.addEventListener('error', j, { once: true });
+  });
+
   let seq = 0;
   const pending = new Map();
+
   ws.addEventListener('message', (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
-    else if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'error' || m.params.type === 'warning')) {
+    if (m.id && pending.has(m.id)) {
+      pending.get(m.id)(m);
+      pending.delete(m.id);
+    } else if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'error' || m.params.type === 'warning')) {
       logs.push(m.params.type + ': ' + m.params.args.map((a) => a.value ?? a.description ?? '').join(' '));
     } else if (m.method === 'Runtime.exceptionThrown') {
       logs.push('exception: ' + (m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text));
     }
   });
-  const send = (method, params = {}) => new Promise((r) => { const id = ++seq; pending.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
+
+  const send = (method, params = {}) => new Promise((r) => {
+    const id = ++seq;
+    pending.set(id, r);
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+
   const evaluate = async (expr) => {
     const res = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
     if (res.result.exceptionDetails) throw new Error(res.result.exceptionDetails.exception?.description || res.result.exceptionDetails.text);
@@ -231,9 +211,13 @@ try {
   await send('Runtime.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: URL_ });
-  for (let i = 0; i < 100; i++) { await sleep(100); if (await evaluate('!!window.__chessboard')) break; }
 
-  // Board state: theme, position, set. Everything goes through the app's own actions.
+  for (let i = 0; i < 100; i++) {
+    await sleep(100);
+    if (await evaluate('!!window.__chessboard')) break;
+  }
+
+  // Theme, position and set, all through the app's own actions.
   await evaluate(`(async () => {
     const cb = window.__chessboard;
     ${THEME ? `cb.actions.setSetting('theme', ${JSON.stringify(THEME)});` : ''}
@@ -245,13 +229,22 @@ try {
     ${FLIP ? `if (cb.store.state.orientation !== 'black') cb.actions.flip();` : ''}
     return true;
   })()`);
+
   let ready = false;
   for (let i = 0; i < 200; i++) {
     await sleep(100);
-    if (await evaluate(`window.__chessboard.layer.currentSet() === ${JSON.stringify(SET)} && !window.__chessboard.layer.isAnimating()`)) { ready = true; break; }
+    if (await evaluate(`window.__chessboard.layer.currentSet() === ${JSON.stringify(SET)} && !window.__chessboard.layer.isAnimating()`)) {
+      ready = true;
+      break;
+    }
   }
-  if (!ready) { console.error(`set '${SET}' did not load; current = ${await evaluate('window.__chessboard.layer.currentSet()')}`); exitCode = 1; }
-  if (FLIP) await sleep(900);   // let the Flip's seat turn finish before any view places the camera by hand
+
+  if (!ready) {
+    console.error(`set '${SET}' did not load; current = ${await evaluate('window.__chessboard.layer.currentSet()')}`);
+    exitCode = 1;
+  }
+
+  if (FLIP) await sleep(900);   // let the seat turn finish before a view places the camera by hand
   if (JS) console.log('js:', JSON.stringify(await evaluate(readFileSync(JS, 'utf8'))));
 
   if (!KEEP_UI) {
@@ -267,6 +260,7 @@ try {
   }
 
   const ROLE_SQ = { king: 'e1', queen: 'd1', knight: 'g1', bishop: 'c1', rook: 'h1', pawn: 'e2' };
+
   for (const v of VIEWS) {
     const cam = await evaluate(`(async () => {
       const cb = window.__chessboard, view = cb.view, T = view.camera.position.constructor;
@@ -318,40 +312,53 @@ try {
       view.render();
       return [view.camera.position.x, view.camera.position.y, view.camera.position.z].map(n => +n.toFixed(2));
     })()`);
+
     await sleep(250);
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const file = join(OUT, `${PREFIX}-${v}.png`);
     writeFileSync(file, Buffer.from(shot.result.data, 'base64'));
     console.log(file, JSON.stringify(cam));
+
     if (MASK) {
       await evaluate(MASK_ON);
       await sleep(150);
       const m = await send('Page.captureScreenshot', { format: 'png' });
       await evaluate(MASK_OFF);
+
       const mfile = join(OUT, `${PREFIX}-${v}-mask.png`);
       writeFileSync(mfile, Buffer.from(m.result.data, 'base64'));
       writeFileSync(join(OUT, `${PREFIX}-${v}-geo.json`), JSON.stringify(await evaluate(GEO)));
       console.log(mfile);
     }
+
     if (NORMALS) {
       await evaluate(NORMALS_ON);
       await sleep(150);
       const n = await send('Page.captureScreenshot', { format: 'png' });
       await evaluate(MASK_OFF);
+
       const nfile = join(OUT, `${PREFIX}-${v}-normals.png`);
       writeFileSync(nfile, Buffer.from(n.result.data, 'base64'));
       console.log(nfile);
     }
   }
+
   if (logs.length) console.log('page console:\n  ' + logs.slice(0, 12).join('\n  '));
 } catch (err) {
   console.error('shoot failed:', err && err.message ? err.message : err);
   if (logs.length) console.error('page console:\n  ' + logs.slice(0, 20).join('\n  '));
   exitCode = 1;
 } finally {
-  try { ws && ws.close(); } catch { /* ignore */ }
+  try {
+    ws && ws.close();
+  } catch {}
+
   chrome.kill();
   await sleep(300);
-  try { rmSync(profile, { recursive: true, force: true }); } catch { /* Chrome may still hold a lock */ }
+
+  try {
+    rmSync(profile, { recursive: true, force: true });
+  } catch {}   // Chrome may still hold a lock
+
   process.exit(exitCode);
 }

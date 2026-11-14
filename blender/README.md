@@ -17,22 +17,47 @@ The board loads those GLBs on first use (`web/src/three/modeledSets.js`).
 
 ## Running it
 
-Blender 4.5 with the MCP add-on listening on `127.0.0.1:9876`. The MCP tool wrapper times out on this
-machine, so the scripts are sent over the add-on's raw socket. The helpers live in the session scratchpad
-(`bl.py` sends code; `blrun.py <module> <function> [args]` reloads `cbkit` plus the module and calls the
-function):
+You need Blender 4.5 LTS. The scripts use numpy and OpenVDB, which ship with Blender, and scipy, which official
+builds may not include. If `import scipy` fails in Blender's Python Console, install it into Blender's own Python
+(the `python` executable under `<blender>/4.5/python/bin/`): `python -m ensurepip`, then `python -m pip install scipy`.
 
-```bash
-python blrun.py set_classic build 2048      # model -> atlas -> bake -> web/sets/classic.glb
-python blrun.py set_classic preview_baked   # studio render of both colours
-python blrun.py board_textures build
-python blrun.py room_hdri build             # renders the study, writes web/src/assets/env_study.hdr
+Paths come from two environment variables, both optional:
+
+- `RUKH_REPO` is the checkout. It defaults to the folder above `blender/`, so you only set it when the scripts
+  are copied somewhere else.
+- `RUKH_WORK` is where the heavy work files go (`.blend` copies, baked PNGs, previews). It defaults to
+  `blender/work/`, which git ignores.
+
+GLBs are written to `web/sets/` and the board and room textures to `web/src/assets/`.
+
+The scripts have no command-line entry point. Each module exposes functions you call from Blender's Python: every
+set has `build(size=2048, export=True)` and `preview_baked()` (most also have `preview()`), `board_textures` has
+`build()`, and `room_hdri` has `build(size=2048, samples=384)`.
+
+Run them from a Blender session with its window open, in the Python Console or the Text Editor. `cbkit` runs some
+operators inside a 3D Viewport (`ctx_view3d`), which needs an open window, so `blender --background` does not work
+for the set builds. Put `blender/` on the module path first:
+
+```python
+import sys
+sys.path.insert(0, r"/path/to/Rukh/blender")
+
+import set_classic
+set_classic.build(2048)        # model -> atlas -> bake -> web/sets/classic.glb
+set_classic.preview_baked()    # after build: both colours, rendered under RUKH_WORK
+
+import board_textures
+board_textures.build()
+
+import room_hdri
+room_hdri.build()              # renders the study, writes web/src/assets/env_study.hdr
 ```
 
-Then `cd ../web && node build.mjs` bundles the new GLBs into `dist/` and into `chessboard.html`.
+Python caches imported modules. After editing a script, reload `cbkit` and then the set module
+(`importlib.reload(cbkit)`, then `importlib.reload(set_classic)`) before you call it again.
 
-Heavy work files (`.blend` copies, baked PNGs, previews) go to `blender/work/` (git-ignored), or wherever
-the `RUKH_WORK` environment variable points.
+Then `cd ../web && node build.mjs` copies the new GLBs into `dist/sets/` and, unless you pass `--no-single`,
+inlines them into `../chessboard.html`.
 
 ## Conventions every set follows
 
@@ -46,7 +71,7 @@ the `RUKH_WORK` environment variable points.
   source (`<id>_<role>_hi`) onto a decimated copy. Hard-surface pieces bake colour, stains and roughness from a
   flat-subdivided copy, and take their normals and AO from the game mesh itself.
 
-## Lessons paid for (see Ideas/Chessboard/log.md, 2026-09-24)
+## Lessons learned
 
 - Never let two sequential EXACT cutters share a plane (the result is a union-like artifact). Never pre-join
   overlapping cutters either.

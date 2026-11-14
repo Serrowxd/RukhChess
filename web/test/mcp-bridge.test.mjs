@@ -1,8 +1,4 @@
-// test/mcp-bridge.test.mjs - the optional MCP bridge (src/ai/mcpBridge.js).
-// Everything ambient is injected: a stub fetch that records every call, and timers that never fire, so the
-// polling loop only runs when a test asks it to. A minimal chessops-backed Game (never core/) keeps this
-// runnable while the core agent is mid-edit.
-// Run from the app root:  node --test test/mcp-bridge.test.mjs
+// The optional MCP bridge (src/ai/mcpBridge.js), with a stub fetch and timers that never fire.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Chess } from 'chessops/chess';
@@ -29,10 +25,15 @@ class MiniGame {
   }
 
   fen() { return makeFen(this.pos.toSetup()); }
+
   turn() { return this.pos.turn; }
+
   pieces() { return []; }
+
   path() { return this._path.slice(); }
+
   mainline() { return this._path.slice(); }
+
   node(id) { return this._path.find(n => n.id === id) || null; }
 
   status() {
@@ -60,6 +61,7 @@ class MiniGame {
   uciToMove(uci) {
     const mv = parseUci(uci);
     if (!mv || !('from' in mv)) return null;
+
     const out = { from: makeSquare(mv.from), to: makeSquare(mv.to) };
     if (mv.promotion) out.promotion = LETTER[mv.promotion];
     return out;
@@ -68,6 +70,7 @@ class MiniGame {
   sanToMove(san) {
     const mv = parseSan(this.pos, san);
     if (!mv || !('from' in mv)) return null;
+
     const out = { from: makeSquare(mv.from), to: makeSquare(mv.to) };
     if (mv.promotion) out.promotion = LETTER[mv.promotion];
     return out;
@@ -77,8 +80,10 @@ class MiniGame {
     const mv = { from: parseSquare(move.from), to: parseSquare(move.to) };
     if (move.promotion) mv.promotion = PROMO[move.promotion];
     if (!this.pos.isLegal(mv)) throw new Error('illegal move');
+
     const san = makeSan(this.pos, mv);
     this.pos.play(mv);
+
     const node = {
       id: 'n' + (++this._n), ply: this.current.ply + 1, san, uci: makeUci(mv), move,
       fen: this.fen(), children: [], arrows: [], highlights: [], note: '', nag: '', parentId: this.current.id,
@@ -92,6 +97,7 @@ class MiniGame {
 
 function makeStore() {
   const listeners = new Map();
+
   const store = {
     state: {
       game: new MiniGame(),
@@ -112,17 +118,31 @@ function makeStore() {
       listeners.get(event).add(fn);
       return () => listeners.get(event).delete(fn);
     },
-    off(event, fn) { const s = listeners.get(event); if (s) s.delete(fn); },
+    off(event, fn) {
+      const s = listeners.get(event);
+      if (s) s.delete(fn);
+    },
     emit(event, payload) { for (const fn of listeners.get(event) || []) fn(payload); },
     listenerCount(event) { return (listeners.get(event) || new Set()).size; },
   };
+
   const log = [];
+
   const actions = {
     playSan(san) {
-      try { const m = store.state.game.sanToMove(san); return m ? store.state.game.play(m) : null; } catch (_) { return null; }
+      try {
+        const m = store.state.game.sanToMove(san);
+        return m ? store.state.game.play(m) : null;
+      } catch (_) {
+        return null;
+      }
     },
     playMove(move) {
-      try { return store.state.game.play(move); } catch (_) { return null; }
+      try {
+        return store.state.game.play(move);
+      } catch (_) {
+        return null;
+      }
     },
     loadFen(fen) {
       try {
@@ -130,33 +150,56 @@ function makeStore() {
         store.state.game.pos = pos;
         store.state.game.startFen = fen;
         return true;
-      } catch (_) { return false; }
+      } catch (_) {
+        return false;
+      }
     },
     newGame() { store.state.game = new MiniGame(); },
-    addArrows(arrows, source) { log.push(['addArrows', arrows, source]); store.state.game.current.arrows = arrows; },
-    setHighlights(list) { log.push(['setHighlights', list]); store.state.game.current.highlights = list; },
-    setNote(text) { log.push(['setNote', text]); store.state.game.current.note = text; },
-    setNag(nag) { log.push(['setNag', nag]); store.state.game.current.nag = nag; },
+    addArrows(arrows, source) {
+      log.push(['addArrows', arrows, source]);
+      store.state.game.current.arrows = arrows;
+    },
+    setHighlights(list) {
+      log.push(['setHighlights', list]);
+      store.state.game.current.highlights = list;
+    },
+    setNote(text) {
+      log.push(['setNote', text]);
+      store.state.game.current.note = text;
+    },
+    setNag(nag) {
+      log.push(['setNag', nag]);
+      store.state.game.current.nag = nag;
+    },
     goto(id) { log.push(['goto', id]); },
     back() { log.push(['back']); },
     forward() { log.push(['forward']); },
     toast(text, kind) { log.push(['toast', text, kind]); },
   };
+
   return { store, actions, log };
 }
 
-/** Records every call; `route(path, method, body)` returns the JSON body (or throws to simulate a dead server). */
+/** Records every call; `route(path, method, body)` returns the JSON body, or throws to act as a dead server. */
 function makeFetch(route) {
   const calls = [];
+
   const fn = async (url, init = {}) => {
     const method = (init.method || 'GET').toUpperCase();
     const path = String(url).slice(MCP_URL.length);
+
     let body = null;
-    try { body = init.body ? JSON.parse(init.body) : null; } catch (_) { body = init.body; }
+    try {
+      body = init.body ? JSON.parse(init.body) : null;
+    } catch (_) {
+      body = init.body;
+    }
+
     calls.push({ url: String(url), path, method, body });
     const out = await route(path, method, body);
     return { ok: true, status: 200, json: async () => out };
   };
+
   return { fn, calls };
 }
 
@@ -174,13 +217,16 @@ const emptyCommands = async (path) => (path.startsWith('/commands') ? { ok: true
 test('disabled: no listeners, no fetch, status off', async () => {
   const { store, bridge, calls } = bridgeWith(emptyCommands);
   assert.equal(store.listenerCount('position:change'), 0);
+
   store.emit('position:change', { fen: 'x' });
   store.emit('selfplay:change', { selfPlay: {} });
   const r = await bridge.poll();
   const p = await bridge.publish();
+
   assert.equal(calls.length, 0, 'a disabled bridge must not touch the network');
   assert.equal(r.ok, false);
   assert.equal(p.ok, false);
+
   const s = bridge.status();
   assert.equal(s.enabled, false);
   assert.equal(s.state, 'off');
@@ -189,8 +235,10 @@ test('disabled: no listeners, no fetch, status off', async () => {
 
 test('enable publishes the position, disable stops everything', async () => {
   const { store, bridge, calls } = bridgeWith(emptyCommands);
+
   bridge.enable();
   await new Promise(r => setImmediate(r));
+
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'POST');
   assert.equal(calls[0].path, '/state');
@@ -200,6 +248,7 @@ test('enable publishes the position, disable stops everything', async () => {
   assert.ok(calls[0].body.legal_moves.includes('e4'), 'the page publishes the legal moves');
   assert.equal(calls[0].body.awaiting, null);
   assert.equal(store.listenerCount('position:change'), 1);
+
   const s = bridge.status();
   assert.equal(s.enabled, true);
   assert.equal(s.connected, true);
@@ -207,6 +256,7 @@ test('enable publishes the position, disable stops everything', async () => {
 
   bridge.disable();
   assert.equal(store.listenerCount('position:change'), 0, 'disable unsubscribes');
+
   store.emit('position:change', { fen: 'x' });
   await new Promise(r => setImmediate(r));
   assert.equal(calls.length, 1, 'nothing is fetched after disable');
@@ -218,14 +268,17 @@ test('publishes on position:change', async () => {
   bridge.enable();
   await new Promise(r => setImmediate(r));
   const before = calls.length;
+
   store.state.game.play(store.state.game.sanToMove('e4'));
   store.emit('position:change', { fen: store.state.game.fen(), turn: 'black' });
   await new Promise(r => setImmediate(r));
+
   assert.equal(calls.length, before + 1);
   const last = calls[calls.length - 1];
   assert.equal(last.path, '/state');
   assert.equal(last.body.turn, 'black');
   assert.equal(last.body.last_move.san, 'e4');
+
   bridge.disable();
 });
 
@@ -237,11 +290,13 @@ test('applies a queued play command and acks it', async () => {
       served = true;
       return { ok: true, commands: [{ seq: 1, op: 'play', args: { move: 'e4' } }], seq: 1 };
     }
+
     if (path === '/ack') return { ok: true, acked: [] };
     return { ok: true, since: 1 };
   });
   bridge.enable();
   await new Promise(r => setImmediate(r));
+
   const out = await bridge.poll();
   assert.equal(out.ok, true);
   assert.equal(out.applied, 1);
@@ -256,9 +311,10 @@ test('applies a queued play command and acks it', async () => {
   assert.equal(ack.body.acks[0].result.turn, 'black');
   assert.equal(bridge.status().since, 1);
 
-  // a second poll must not replay it
+  // A second poll must not replay it.
   const again = await bridge.poll();
   assert.equal(again.applied, 0);
+
   bridge.disable();
 });
 
@@ -287,11 +343,12 @@ test('applies annotate, set_fen and new_game; refuses illegal and unknown comman
   assert.equal(unknown.ok, false);
   assert.match(unknown.error, /unknown command/);
 
-  // an action that throws is reported, never raised into the app
+  // An action that throws is reported, never raised into the app.
   actions.newGame = () => { throw new Error('boom'); };
   const thrown = bridge.applyCommand({ op: 'new_game' });
   assert.equal(thrown.ok, false);
   assert.equal(thrown.error, 'boom');
+
   bridge.disable();
 });
 
@@ -299,10 +356,12 @@ test('a dead server never throws and backs off', async () => {
   const { store, bridge, calls } = bridgeWith(async () => { throw new Error('fetch failed'); });
   bridge.enable();
   await new Promise(r => setImmediate(r));
+
   let s = bridge.status();
   assert.equal(s.connected, false);
   assert.equal(s.state, 'offline');
   assert.match(s.lastError, /cannot reach http:\/\/127\.0\.0\.1:8152/);
+
   const first = s.delay;
   assert.ok(first > POLL_MS, 'the first failure already backs off');
 
@@ -315,11 +374,12 @@ test('a dead server never throws and backs off', async () => {
   const capped = bridge.status().delay;
   assert.equal(capped, MAX_BACKOFF_MS, 'backoff is capped');
 
-  // still no exception on the app's own path
+  // Still no exception on the app's own path.
   store.emit('position:change', { fen: 'x' });
   await new Promise(r => setImmediate(r));
   assert.ok(calls.length > 2);
   assert.equal(bridge.status().enabled, true, 'a dead server does not disable the bridge');
+
   bridge.disable();
 });
 
@@ -327,15 +387,18 @@ test('self-play: awaiting names the colour the AI must move', async () => {
   const { store, log, bridge, calls } = bridgeWith(emptyCommands);
   bridge.enable();
   await new Promise(r => setImmediate(r));
+
   store.state.selfPlay = { on: true, opponent: 'ai', awaiting: 'black' };
   store.emit('selfplay:change', { selfPlay: store.state.selfPlay });
   await new Promise(r => setImmediate(r));
+
   const last = calls.filter(c => c.path === '/state').pop();
   assert.equal(last.body.awaiting, 'black');
   assert.equal(last.body.opponent, 'ai');
   assert.equal(last.body.self_play, true);
   assert.equal(bridge.status().awaiting, 'black');
   assert.ok(log.some(l => l[0] === 'toast' && /AI to play black/.test(l[1])), 'the user is told the AI was asked');
+
   bridge.disable();
 });
 
@@ -349,36 +412,48 @@ test('a restarted server rewinds the command cursor', async () => {
   await new Promise(r => setImmediate(r));
   await bridge.poll();
   bridge.applyCommand({ op: 'ping' });
-  // pretend the bridge had advanced its cursor, then the python process restarted at 0
+
+  // The bridge's cursor has advanced, then the python process restarts at 0.
   const served = [{ seq: 1, op: 'ping', args: {} }];
   let first = true;
   const { bridge: b2, calls } = bridgeWith(async (path) => {
     if (path.startsWith('/commands')) {
       const since = Number(path.split('since=')[1]);
-      if (first) { first = false; return { ok: true, commands: [], seq: 9, since }; }
+
+      if (first) {
+        first = false;
+        return { ok: true, commands: [], seq: 9, since };
+      }
+
       return { ok: true, commands: served, seq: 1, since };
     }
+
     return { ok: true, since: 0 };
   });
+
   b2.enable();
   await new Promise(r => setImmediate(r));
   await b2.poll();
   const out = await b2.poll();
+
   assert.equal(out.applied, 1, 'commands from the restarted server are still seen');
   assert.ok(calls.some(c => c.path === '/ack'));
+
   b2.disable();
 });
 
 test('no fetch implementation is a status, not a crash', () => {
   const { store, actions } = makeStore();
   const bridge = createMcpBridge(store, actions, { fetch: null, ...frozenTimers });
+
   const s = bridge.enable();
+
   assert.equal(s.enabled, false);
   assert.match(s.lastError, /fetch is not available/);
   assert.equal(store.listenerCount('position:change'), 0);
 });
 
-// ---- Addendum v2: the style travels with the request ----
+// The style travels with the request.
 
 test('the published payload carries a valid ai_style, whatever settings hold', async () => {
   const { store, bridge, calls } = bridgeWith(emptyCommands);
@@ -392,7 +467,9 @@ test('the published payload carries a valid ai_style, whatever settings hold', a
   ]) {
     store.state.settings.selfPlay = { aiStyle: stored };
     const before = calls.length;
+
     await bridge.publish();
+
     assert.ok(calls.length > before, 'publish should have posted');
     assert.equal(calls[calls.length - 1].body.ai_style, want, `stored ${JSON.stringify(stored)}`);
   }
@@ -402,8 +479,10 @@ test('ai_style rides alongside awaiting, so one request says both who and what k
   const { store, bridge, calls } = bridgeWith(emptyCommands);
   store.state.settings.selfPlay = { aiStyle: 'coach' };
   store.state.selfPlay = { on: true, opponent: 'ai', awaiting: 'black' };
+
   bridge.enable();
   await new Promise(r => setImmediate(r));
+
   const body = calls[0].body;
   assert.equal(body.awaiting, 'black');
   assert.equal(body.opponent, 'ai');

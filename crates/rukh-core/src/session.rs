@@ -1,14 +1,9 @@
-//! A session: the game plus who plays which side, where the game being played ends (the tip),
-//! and what kind of opponent an AI should be.
-//!
-//! Nothing here stores whose move is owed. [`Session::to_move`] computes it from the position
-//! every time it is asked.
+//! A session: the game, the seats, the tip of the game being played, and the AI's style.
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Game, NodeId, Status};
 
-/// A colour, used for seats and turns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Side {
@@ -39,7 +34,7 @@ impl Side {
         }
     }
 
-    /// The side to move in a FEN (its second field). Anything unreadable counts as White.
+    /// The side to move in a FEN. Anything unreadable counts as White.
     pub fn to_move_in(fen: &str) -> Side {
         match fen.split(' ').nth(1) {
             Some("b") => Side::Black,
@@ -48,7 +43,6 @@ impl Side {
     }
 }
 
-/// Who sits in a seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Seat {
@@ -68,7 +62,6 @@ impl Seat {
     }
 }
 
-/// Both seats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Seats {
     pub white: Seat,
@@ -101,42 +94,39 @@ pub enum Style {
     Coach,
 }
 
-// The rule texts are written once, as macros, so the full coach rule below can be put together
-// from the same literals at compile time.
+// Macros so RULE_COACH_IN_FULL can be built from the same literals at compile time.
 macro_rules! rule_annotate {
     () => {
         "play the move, and attach to *that* node one short note (why) plus at most two arrows \
          and two highlights. Never annotate any other node."
     };
 }
+
 macro_rules! rule_coach {
     () => {
-        "`annotate`, plus: if her previous move was a clear mistake, say so in the note and draw \
-         the refutation. Judgement call, not an engine verdict; silence is correct when the move \
+        "`annotate`, plus: if the player's previous move was a clear mistake, say so in the note and \
+         draw the refutation. Judgement call, not an engine verdict; silence is correct when the move \
          was fine."
     };
 }
 
-/// The silent rule, word for word from the style contract.
 pub const RULE_SILENT: &str =
     "play the move. Do not annotate, do not note. Nothing on the board but the move.";
-/// The annotate rule, word for word from the style contract.
+
 pub const RULE_ANNOTATE: &str = rule_annotate!();
-/// The coach rule, word for word from the style contract. It builds on the annotate rule, so on
-/// its own it is only complete next to [`RULE_ANNOTATE`], as in the server instructions.
+
+/// Only complete next to [`RULE_ANNOTATE`], as in the server instructions.
 pub const RULE_COACH: &str = rule_coach!();
-/// The coach rule as carried in tool results, where the annotate rule it refers to is not shown:
-/// the annotate rule, then the coach rule, both word for word.
+
+/// The annotate rule then the coach rule, for tool results where the annotate rule is not shown.
 pub const RULE_COACH_IN_FULL: &str = concat!(
     rule_annotate!(),
-    " As coach, also follow this (\"`annotate`\" is the rule just given, not the tool; \"her\" is \
-     the person you play): ",
+    " As coach, also follow this (\"`annotate`\" is the rule just given, not the tool): ",
     rule_coach!()
 );
 
 impl Style {
-    /// Any text to a style: `silent`, `annotate` or `coach` (case and spaces ignored); anything
-    /// else becomes `annotate`.
+    /// `silent`, `annotate` or `coach`, case and spaces ignored; anything else is `annotate`.
     pub fn normalize(text: &str) -> Style {
         match text.trim().to_ascii_lowercase().as_str() {
             "silent" => Style::Silent,
@@ -153,8 +143,7 @@ impl Style {
         }
     }
 
-    /// What an AI playing in this style must do, complete on its own (the coach rule includes the
-    /// annotate rule it builds on).
+    /// What an AI playing in this style must do, complete on its own.
     pub fn rule(self) -> &'static str {
         match self {
             Style::Silent => RULE_SILENT,
@@ -163,7 +152,6 @@ impl Style {
         }
     }
 
-    /// `{name, rule}`, as carried in AI-facing results.
     pub fn info(self) -> StyleInfo {
         StyleInfo {
             name: self.name(),
@@ -172,14 +160,12 @@ impl Style {
     }
 }
 
-/// A style with its rule text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct StyleInfo {
     pub name: &'static str,
     pub rule: &'static str,
 }
 
-/// The match: whether one is being played, the seats, the tip and the style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MatchState {
     pub active: bool,
@@ -196,7 +182,6 @@ pub struct Study {
     pub notes: String,
 }
 
-/// The game and the match around it.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub game: Game,
@@ -211,7 +196,7 @@ impl Default for Session {
 }
 
 impl Session {
-    /// A session on `game` with both seats human and no match (the analysis board).
+    /// Both seats human and no match: the analysis board.
     pub fn new(game: Game) -> Session {
         Session {
             game,
@@ -225,7 +210,6 @@ impl Session {
         self.play.active && self.game.current() == self.play.tip
     }
 
-    /// The side to move at the tip.
     pub fn turn_at_tip(&self) -> Side {
         self.game
             .node(self.play.tip)
@@ -238,21 +222,22 @@ impl Session {
         if node == self.game.current() {
             return Some(self.game.status());
         }
+
         let mut probe = self.game.clone();
         probe.goto(node).ok()?;
+
         Some(probe.status())
     }
 
-    /// Who is to move now: the seat on the side to move at the tip, when a match is active, the
-    /// board is on the tip and the game there is not over. Otherwise `None`. Never stored.
+    /// The seat owed a move, when live and the game is not over. Never stored.
     pub fn to_move(&self) -> Option<Seat> {
         if !self.live() || self.game.status().outcome.is_some() {
             return None;
         }
+
         Some(self.play.seats.get(self.turn_at_tip()))
     }
 
-    /// True when an AI holding `side` should move now.
     pub fn is_ai_turn(&self, side: Side) -> bool {
         self.to_move() == Some(Seat::Ai) && self.turn_at_tip() == side
     }

@@ -1,63 +1,3 @@
-// three/pieces.js -- piece sets: procedural 'staunton' (lathe profiles + extruded knight head),
-// 'minimal' (cylinders with role caps), 'glyph' (flat 2D token: disc + contrasting bezel + cburnett
-// glyph with a contrast halo), and user glTF sets.
-// Owns: BUILTIN_SETS, listSets, createPiece, registerGltfSet, applyMaterials per CONTRACT.md.
-//
-// 2026-09-18 rework (addendum v1). What changed and why:
-//   * The Staunton set was squat and faceted. Profiles are now generated from cubic Beziers and arcs
-//     (60-100 points each instead of ~20) and the lathe runs 64 segments, so the silhouettes are smooth
-//     and the turned mouldings are real curves. The height ladder was re-cut to Staunton proportions
-//     (see HEIGHTS) -- taller relative to the same <= 0.8 footprint, which is what "squat" was.
-//   * Silhouettes were made genuinely distinct: king tallest with a DOUBLE cross (reads as a cross from
-//     the seat AND as a plus from straight above) over an orb and a domed crown; queen with a nine-point
-//     coronet around a cupped rim; bishop with a swelling mitre, a slit and a ball finial; rook with a
-//     real hollow top (a revolved ring, not a disc) and four crenellations; knight a carved head with a
-//     notched mane, cheeks and a deep bevel instead of a slab; pawn a ball on a collared neck.
-//   * Every piece carries a soft contact-shadow decal (matSet.contactShadow) so a light piece never
-//     merges into a light square. See materials.js for the other half of the contrast aid.
-//   * 'glyph' is now a proper 2D token (bezel + halo'd glyph) because 2D mode uses it: BUILTIN_SETS_2D.
-//
-// Added beyond the contract (all exported):
-//   ROLES, HEIGHTS                      : role list and the height ladder
-//   PROFILES, KNIGHT_BASE_PROFILE,
-//   ROOK_CROWN_PROFILE, GLYPH_DISC_PROFILE,
-//   GLYPH_BEZEL_PROFILE                 : lathe profiles as plain [radius, height] arrays (node-safe, tested).
-//                                         PROFILES / KNIGHT_BASE_PROFILE / GLYPH_DISC_PROFILE start on the
-//                                         axis and close on the axis. ROOK_CROWN_PROFILE and
-//                                         GLYPH_BEZEL_PROFILE are CLOSED LOOPS (first point == last) that
-//                                         revolve into a hollow ring -- they never touch the axis.
-//   KNIGHT_HEAD_SILHOUETTE              : the horse-head outline as [x, y] points (x = forward)
-//   CONTACT_RADIUS                      : radius of the contact-shadow decal per role
-//   BUILTIN_SETS_2D                     : the sets that read from straight above (settings.pieceSet2d)
-//   isFlatSet(id) -> bool               : true for token sets that lie flat (currently 'glyph')
-//   unregisterSet(id)                   : drop a registered glTF set (disposes its geometry)
-//   setKind(id) -> 'builtin'|'gltf'|null, isDirectional(id) -> bool (layer rotates by colour when true;
-//                                         false for 'glyph', whose tokens read upright from White's seat)
-//   getGlyphTexture(glyphId, size, opts) -> Promise<THREE.CanvasTexture>   (cached per key; rasterised
-//                                         from the inline SVG. opts { halo, haloWidth, viewBox } draws a
-//                                         contrast halo around the art. A FAILED load is not cached: the
-//                                         next card of that glyph retries.)
-//   disposePieceCaches()                : free the shared geometry / glyph texture caches (layer.dispose calls it)
-//   registerGltfSet mapping values may be a node name (used for both colours) OR { white, black } node names.
-//   registerGltfSet `scale` multiplies the automatic king-height normalisation (default 1).
-//
-// Conventions: every piece is a THREE.Group with userData { role, color, square: null, set }, origin at the
-// base centre on y = 0, knights/bishops/kings authored facing +Z (the layer rotates by colour). Geometries are
-// shared through a cache (never dispose a piece's geometry directly; use disposePieceCaches()).
-// Mesh userData flags other modules should know about:
-//   keepMaterial   -- applyMaterials() must not overwrite this mesh's material
-//   ownFinish      -- a modelled set's own baked material: the wood theme's look. applyMaterials() swaps it for
-//                     the theme's finish over the same baked detail in metal and glass (matSet.modeledPiece)
-//                     and puts the very same material back in wood
-//   accent         -- an inset/bezel; applyMaterials() points it at matSet.white/blackAccent
-//   contactShadow  -- the decal under the piece; applyMaterials() points it at matSet.contactShadow.
-//                     It pins ITSELF to the board plane in onBeforeRender, so a lifted piece does not
-//                     carry its shadow up. `pieceObj.userData.contactShadow` is the mesh, if a caller
-//                     wants to hide it.
-//   glyphCard      -- the 2D token's glyph quad (own MeshBasicMaterial, never lit)
-//   standIn        -- a modelled piece's low-detail stand-in (see standInOf): hidden, never picked; the view shows it
-//                     only while it draws the shadow map and the edge-light mask, in the full mesh's place
-
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
@@ -70,12 +10,7 @@ import { requestRedraw } from './redraw.js';
 /** Piece roles in the contract vocabulary. */
 export const ROLES = ['pawn', 'knight', 'bishop', 'rook', 'queen', 'king'];
 
-/**
- * Target heights per role (world units; one square = 1).
- * Staunton proportions: relative to the king these are 1.00 / .864 / .746 / .678 / .593 / .492, which is
- * a real tournament set (3.75" king on a 2.25" square). The v0 ladder topped out at 1.05 with wide bases,
- * which is what read as "squat". Footprint stays inside the contract's 0.8.
- */
+/** Target heights per role in world units (one square = 1), tournament Staunton proportions. */
 export const HEIGHTS = { pawn: 0.58, knight: 0.80, bishop: 0.88, rook: 0.70, queen: 1.02, king: 1.18 };
 
 /** The built-in sets, in menu order. */
@@ -95,7 +30,7 @@ export function isFlatSet(id) {
   return BUILTIN_SETS_2D.some((s) => s.id === id);
 }
 
-const LATHE_SEGMENTS = 64;      // was 48; the stepping was visible on the big pieces
+const LATHE_SEGMENTS = 64;      // fewer shows stepping on the big pieces
 const MAX_PIECE_RADIUS = 0.4;   // contract: footprint <= 0.8 units
 
 /** Radius of the soft contact-shadow decal under each role (world units). */
@@ -105,21 +40,19 @@ export const CONTACT_RADIUS = {
 const CONTACT_Y = 0.0045;
 const GLYPH_CONTACT_RADIUS = 0.396;
 
-// ---------------------------------------------------------------------------------------------
-// Profile construction. Plain [radius, height] pairs, bottom to top. A repeated point makes a sharp
-// crease (LatheGeometry gives a zero-length segment a zero normal, so the neighbours keep their own).
-
 const round = (v) => Math.round(v * 1e4) / 1e4;
 const P = (r, y) => [round(Math.max(0, r)), round(y)];
 
 /** Cubic Bezier in the (radius, height) plane. Returns n points EXCLUDING t = 0. */
 function bez(p0, c0, c1, p1, n) {
   const out = [];
+
   for (let i = 1; i <= n; i++) {
     const t = i / n, u = 1 - t;
     const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
     out.push(P(a * p0[0] + b * c0[0] + c * c1[0] + d * p1[0], a * p0[1] + b * c0[1] + c * c1[1] + d * p1[1]));
   }
+
   return out;
 }
 
@@ -128,27 +61,49 @@ function turn() {
   const pts = [];
   const api = {
     at: () => pts[pts.length - 1],
-    move(r, y) { pts.push(P(r, y)); return api; },
+
+    move(r, y) {
+      pts.push(P(r, y));
+      return api;
+    },
+
     /** Repeat the last point: a hard crease (the two sides keep their own normals). */
-    crease() { pts.push(api.at().slice()); return api; },
+    crease() {
+      pts.push(api.at().slice());
+      return api;
+    },
+
     /** Straight run to (r, y) in n steps. */
     line(r, y, n = 1) {
       const [r0, y0] = api.at();
-      for (let i = 1; i <= n; i++) { const t = i / n; pts.push(P(r0 + (r - r0) * t, y0 + (y - y0) * t)); }
+
+      for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        pts.push(P(r0 + (r - r0) * t, y0 + (y - y0) * t));
+      }
+
       return api;
     },
+
     /** Cubic curve from the current point through two controls to (r, y). */
-    curve(c0, c1, p1, n) { pts.push(...bez(api.at(), c0, c1, p1, n)); return api; },
-    /** Circular arc centred on the AXIS at height cy, radius rad, angles in degrees (excludes a0). */
+    curve(c0, c1, p1, n) {
+      pts.push(...bez(api.at(), c0, c1, p1, n));
+      return api;
+    },
+
+    /** Circular arc centred on the axis at height cy, radius rad, angles in degrees (excludes a0). */
     arc(cy, rad, a0, a1, n) {
       for (let i = 1; i <= n; i++) {
         const a = (a0 + (a1 - a0) * (i / n)) * Math.PI / 180;
         pts.push(P(rad * Math.cos(a), cy + rad * Math.sin(a)));
       }
+
       return api;
     },
+
     done: () => pts,
   };
+
   return api;
 }
 
@@ -158,10 +113,7 @@ function ballStart(cy, rad, a0) {
   return [rad * Math.cos(a), cy + rad * Math.sin(a)];
 }
 
-/**
- * A classic turned foot: flat underside, a slightly convex outer wall, then an ogee up to the stem.
- * @param {ReturnType<turn>} b   builder positioned at the origin
- */
+/** A turned foot: flat underside, a slightly convex wall, then an ogee up to the stem. */
 function foot(b, rBase, rStem, h) {
   return b
     .line(rBase * 0.42, 0).line(rBase * 0.78, 0).line(rBase, 0).crease()
@@ -170,7 +122,7 @@ function foot(b, rBase, rStem, h) {
     .curve([round(rStem * 1.07), h * 0.90], [round(rStem * 1.01), h * 0.96], [rStem, h], 4);
 }
 
-// --- pawn: foot -> slim concave neck -> collar -> ball. Top 0.58. -------------------------------
+// pawn: foot, slim concave neck, collar, ball
 function pawnProfile() {
   const b = turn().move(0, 0);
   foot(b, 0.215, 0.132, 0.100);
@@ -181,11 +133,11 @@ function pawnProfile() {
   const s = ballStart(0.475, 0.105, -55);
   b.curve([0.0615, 0.379], [0.0600, 0.385], [round(s[0]), round(s[1])], 3)
    .arc(0.475, 0.105, -55, 90, 18);                                // ball, top 0.580
+
   return b.done();
 }
 
-// --- rook: foot -> straight shaft -> collar -> flared crown, flat cup floor at 0.60. ------------
-// The hollow top and the four crenellations are separate geometry (ROOK_CROWN_PROFILE + merlons).
+// rook: foot, straight shaft, collar, flared crown, cup floor; crown ring and merlons are separate
 const ROOK_CUP_Y = 0.600;
 const ROOK_CROWN_OUTER = 0.2265;
 const ROOK_CROWN_INNER = 0.1850;
@@ -205,13 +157,11 @@ function rookProfile() {
    .crease()
    .line(ROOK_CROWN_INNER, ROOK_CUP_Y, 3)                          // the cup floor you see from above
    .line(0, ROOK_CUP_Y, 3);
+
   return b.done();
 }
 
-/**
- * The rook's crown: a CLOSED cross-section (first point == last) revolved into a real hollow ring, so
- * the top of the rook is open, not a disc with bumps. Sits between the cup floor and the merlons.
- */
+/** The rook's crown: a closed cross-section revolved into a hollow ring. */
 export const ROOK_CROWN_PROFILE = [
   P(ROOK_CROWN_OUTER, ROOK_CUP_Y),
   P(ROOK_CROWN_OUTER, ROOK_BAND_TOP - 0.014),
@@ -224,7 +174,7 @@ export const ROOK_CROWN_PROFILE = [
   P(ROOK_CROWN_OUTER, ROOK_CUP_Y),
 ];
 
-// --- bishop: foot -> slim neck -> collar -> swelling mitre -> ball finial. Top 0.88. ------------
+// bishop: foot, slim neck, collar, swelling mitre, ball finial
 function bishopProfile() {
   const b = turn().move(0, 0);
   foot(b, 0.235, 0.156, 0.112);
@@ -237,13 +187,15 @@ function bishopProfile() {
    .curve([0.1495, 0.600], [0.1420, 0.665], [0.1180, 0.712], 13)
    .curve([0.0980, 0.745], [0.0700, 0.762], [0.0460, 0.770], 10)
    .crease();
+
   const s = ballStart(0.828, 0.052, -60);
   b.curve([0.036, 0.7745], [0.028, 0.778], [round(s[0]), round(s[1])], 4)
    .arc(0.828, 0.052, -60, 90, 14);                                // finial, top 0.880
+
   return b.done();
 }
 
-// --- queen: foot -> long neck -> collar -> flaring bowl -> cupped rim -> finial. Top 1.02. ------
+// queen: foot, long neck, collar, flaring bowl, cupped rim, finial
 const QUEEN_RIM_Y = 0.838;
 const QUEEN_CORONET_R = 0.176;
 
@@ -264,13 +216,15 @@ function queenProfile() {
    .curve([0.110, 0.850], [0.075, 0.852], [0.0585, 0.862], 7)
    .curve([0.052, 0.874], [0.0495, 0.888], [0.0480, 0.903], 6)
    .crease();
+
   const s = ballStart(0.9615, 0.0585, -50);
   b.curve([0.043, 0.909], [0.0390, 0.913], [round(s[0]), round(s[1])], 3)
    .arc(0.9615, 0.0585, -50, 90, 16);                              // finial, top 1.020
+
   return b.done();
 }
 
-// --- king: foot -> long neck -> collar -> bowl -> crown rim -> dome. Orb + double cross on top. --
+// king: foot, long neck, collar, bowl, crown rim, dome; orb and double cross on top
 const KING_DOME_TOP = 1.012;
 
 function kingProfile() {
@@ -289,6 +243,7 @@ function kingProfile() {
    .curve([0.196, 0.947], [0.176, 0.952], [0.1600, 0.960], 5)      // step in
    .curve([0.132, 0.976], [0.095, 0.992], [0.0550, 1.002], 10)     // dome
    .curve([0.036, 1.007], [0.018, 1.010], [0, KING_DOME_TOP], 5);
+
   return b.done();
 }
 
@@ -313,14 +268,11 @@ export const KNIGHT_BASE_PROFILE = (() => {
    .crease()
    .line(0.172, KNIGHT_BASE_TOP, 2)
    .line(0, KNIGHT_BASE_TOP, 3);
+
   return b.done();
 })();
 
-/**
- * Horse-head silhouette, [x, y] with x = forward (muzzle) and y up from the neck base. Authored freely
- * and then normalised by knightHeadGeometry() so the finished head is exactly HEIGHTS.knight tall.
- * The `back` run carries the mane notches -- that is what stops it reading as a slab in profile.
- */
+/** Horse-head silhouette, [x, y] with x = forward (muzzle); knightHeadGeometry() fits its height. */
 export const KNIGHT_HEAD_SILHOUETTE = {
   neckBase: [[-0.155, 0.000], [0.115, 0.000]],
   front: [                              // throat -> jaw -> muzzle -> nose -> forehead
@@ -339,7 +291,7 @@ export const KNIGHT_HEAD_SILHOUETTE = {
 const KNIGHT_HEAD_DEPTH = 0.170;      // plus 2 x bevelThickness -> ~0.27 across
 const KNIGHT_HEAD_CENTRE_X = 0.040;   // where the head's x-centre sits over the base
 
-// --- glyph token: a disc, a contrasting bezel ring around it, and the glyph card on top. ---------
+// glyph token: a disc, a contrasting bezel ring around it, and the glyph card on top
 const TOKEN_TOP = 0.072;
 const TOKEN_DISC_R = 0.300;
 const TOKEN_BEZEL_R = 0.375;
@@ -352,29 +304,31 @@ export const GLYPH_DISC_PROFILE = (() => {
    .curve([TOKEN_DISC_R, 0.062], [0.295, 0.070], [0.284, TOKEN_TOP], 5)
    .crease()
    .line(0.19, TOKEN_TOP).line(0.09, TOKEN_TOP).line(0, TOKEN_TOP);
+
   return b.done();
 })();
 
-/**
- * The 2D token's bezel: a CLOSED cross-section (first point == last) revolved into a ring that sits
- * around the disc in the ACCENT colour. This is what makes a white token impossible to lose against a
- * light square from straight above, with or without lights.
- */
+/** The 2D token's bezel: a closed cross-section revolved into a ring in the accent colour. */
 export const GLYPH_BEZEL_PROFILE = [
   P(0.298, 0), P(0.352, 0), P(TOKEN_BEZEL_R, 0.006), P(TOKEN_BEZEL_R, 0.052),
   P(0.371, 0.064), P(0.360, 0.073), P(0.330, 0.0755), P(0.308, 0.0745), P(0.298, 0.070),
   P(0.298, 0),
 ];
 
-// ---------------------------------------------------------------------------------------------
-// Geometry cache (shared across every piece of a set).
-
 const geoCache = new Map();
+
 function cached(key, make) {
   let g = geoCache.get(key);
-  if (!g) { g = make(); g.name = key; geoCache.set(key, g); }
+
+  if (!g) {
+    g = make();
+    g.name = key;
+    geoCache.set(key, g);
+  }
+
   return g;
 }
+
 function latheGeometry(key, profile, segments = LATHE_SEGMENTS) {
   return cached(key, () => new THREE.LatheGeometry(profile.map(([r, y]) => new THREE.Vector2(r, y)), segments));
 }
@@ -388,6 +342,7 @@ function annularSectorGeometry(key, rIn, rOut, span, h, bevel = 0.006) {
     s.absarc(0, 0, rOut, -a, a, false);
     s.absarc(0, 0, rIn, a, -a, true);
     s.closePath();
+
     const g = new THREE.ExtrudeGeometry(s, {
       depth: h - 2 * bevel, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel * 0.8,
       bevelSegments: 2, curveSegments: 14,
@@ -404,15 +359,25 @@ function crossGeometry(key, arm, half, thick, depth, bevel = 0.006) {
     const s = new THREE.Shape();
     const t = thick / 2;
     s.moveTo(-t, -half);
-    s.lineTo(t, -half); s.lineTo(t, -t); s.lineTo(arm, -t); s.lineTo(arm, t);
-    s.lineTo(t, t); s.lineTo(t, half); s.lineTo(-t, half); s.lineTo(-t, t);
-    s.lineTo(-arm, t); s.lineTo(-arm, -t); s.lineTo(-t, -t);
+    s.lineTo(t, -half);
+    s.lineTo(t, -t);
+    s.lineTo(arm, -t);
+    s.lineTo(arm, t);
+    s.lineTo(t, t);
+    s.lineTo(t, half);
+    s.lineTo(-t, half);
+    s.lineTo(-t, t);
+    s.lineTo(-arm, t);
+    s.lineTo(-arm, -t);
+    s.lineTo(-t, -t);
     s.closePath();
+
     const g = new THREE.ExtrudeGeometry(s, {
       depth: depth - 2 * bevel, bevelEnabled: true, bevelThickness: bevel, bevelSize: bevel,
       bevelSegments: 2, curveSegments: 4,
     });
     g.translate(0, 0, -(depth - 2 * bevel) / 2);
+
     return g;
   });
 }
@@ -427,56 +392,64 @@ function knightHeadGeometry() {
     for (const [x, y] of s.ears) shape.lineTo(x, y);
     shape.splineThru(s.back.map(([x, y]) => new THREE.Vector2(x, y)));
     shape.closePath();
+
     let g = new THREE.ExtrudeGeometry(shape, {
-      // 12/4 is the knee of the curve: 14/5 costs ~20% more triangles and ~11 ms of the one-off cold
-      // build for no visible gain (the bevel is 0.03 across). mergeVertices below dominates the cost.
+      // 12/4: more segments cost triangles and build time for no visible gain
       depth: KNIGHT_HEAD_DEPTH, bevelEnabled: true, bevelThickness: 0.048, bevelSize: 0.030,
       bevelSegments: 4, curveSegments: 12,
     });
     g.translate(0, 0, -(KNIGHT_HEAD_DEPTH / 2));
     g = mergeVertices(g, 1e-4);
     g.computeVertexNormals();
-    // Normalise: the bevel expands the authored outline, so measure and fit the head exactly.
+
+    // the bevel expands the authored outline, so measure and fit the head exactly
     g.computeBoundingBox();
     const bb = g.boundingBox;
     const target = HEIGHTS.knight - KNIGHT_BASE_TOP;
     const k = target / (bb.max.y - bb.min.y);
     g.scale(k, k, k);
+
     g.computeBoundingBox();
     const b2 = g.boundingBox;
     g.translate(KNIGHT_HEAD_CENTRE_X - (b2.min.x + b2.max.x) / 2, -b2.min.y, 0);
     g.computeBoundingBox();
     g.computeBoundingSphere();
+
     return g;
   });
 }
 
-// ---------------------------------------------------------------------------------------------
-// Materials helpers. matSet (materials.js) owns the real ones; these are the node/test fallbacks.
+// node / test fallbacks; matSet owns the real materials
 
 const FALLBACK = {
   white: new THREE.MeshStandardMaterial({ color: '#F6EEDD', roughness: 0.5 }),
   black: new THREE.MeshStandardMaterial({ color: '#241B13', roughness: 0.45 }),
 };
 const ACCENT = {
-  white: new THREE.MeshStandardMaterial({ color: '#171209', roughness: 0.55, metalness: 0 }),  // dark inset on light pieces
-  black: new THREE.MeshStandardMaterial({ color: '#C7B79B', roughness: 0.55, metalness: 0 }),  // light inset on dark pieces
+  // dark inset on light pieces, light inset on dark ones
+  white: new THREE.MeshStandardMaterial({ color: '#171209', roughness: 0.55, metalness: 0 }),
+  black: new THREE.MeshStandardMaterial({ color: '#C7B79B', roughness: 0.55, metalness: 0 }),
 };
 const CONTACT_FALLBACK = new THREE.MeshBasicMaterial({
   color: '#1A1208', transparent: true, opacity: 0.34, depthWrite: false, toneMapped: false,
 });
-FALLBACK.white.name = 'piece.fallback.white'; FALLBACK.black.name = 'piece.fallback.black';
-ACCENT.white.name = 'piece.accent.onWhite'; ACCENT.black.name = 'piece.accent.onBlack';
+
+FALLBACK.white.name = 'piece.fallback.white';
+FALLBACK.black.name = 'piece.fallback.black';
+ACCENT.white.name = 'piece.accent.onWhite';
+ACCENT.black.name = 'piece.accent.onBlack';
 CONTACT_FALLBACK.name = 'piece.contactShadow.fallback';
 
 function pieceMaterial(color, matSet) {
   if (matSet && matSet.whitePiece && matSet.blackPiece) return color === 'black' ? matSet.blackPiece : matSet.whitePiece;
   return FALLBACK[color === 'black' ? 'black' : 'white'];
 }
+
 function accentMaterial(color, matSet) {
   if (matSet && matSet.whiteAccent && matSet.blackAccent) return color === 'black' ? matSet.blackAccent : matSet.whiteAccent;
   return ACCENT[color === 'black' ? 'black' : 'white'];
 }
+
 function contactMaterial(matSet) {
   return (matSet && matSet.contactShadow) || CONTACT_FALLBACK;
 }
@@ -503,12 +476,7 @@ function pieceGroup(role, color, setId) {
   return g;
 }
 
-/**
- * Pin the decal to the board plane no matter how far its parent has been lifted. onBeforeRender runs
- * BEFORE the renderer derives modelViewMatrix from matrixWorld, so writing the world Y here lands on
- * the same frame. The piece group is only ever translated and rotated about Y, so element 13 is its
- * world height and nothing else has to be touched.
- */
+/** Pin the decal to the board plane however far its piece is lifted (element 13 = world y). */
 function pinContactShadow(renderer, scene, camera) {
   this.matrixWorld.elements[13] = CONTACT_Y;
 }
@@ -535,12 +503,10 @@ function addContactShadow(g, radius, matSet) {
   return m;
 }
 
-// ---------------------------------------------------------------------------------------------
-// 'staunton'
-
 function buildStaunton(role, color, matSet) {
   const g = pieceGroup(role, color, 'staunton');
   const mat = pieceMaterial(color, matSet);
+
   switch (role) {
     case 'pawn':
       g.add(mesh(latheGeometry('staunton.pawn', PROFILES.pawn), mat));
@@ -550,9 +516,11 @@ function buildStaunton(role, color, matSet) {
       g.add(mesh(latheGeometry('staunton.rook', PROFILES.rook), mat));
       // real hollow crown: a revolved ring, not a capped disc
       g.add(mesh(latheGeometry('staunton.rook.crown', ROOK_CROWN_PROFILE), mat));
+
       const merlon = annularSectorGeometry(
         'staunton.rook.merlon', ROOK_CROWN_INNER, ROOK_CROWN_OUTER, 56, HEIGHTS.rook - ROOK_BAND_TOP, 0.007,
       );
+
       for (let i = 0; i < 4; i++) {
         const m = mesh(merlon, mat);
         m.position.y = ROOK_BAND_TOP;
@@ -564,6 +532,7 @@ function buildStaunton(role, color, matSet) {
 
     case 'bishop': {
       g.add(mesh(latheGeometry('staunton.bishop', PROFILES.bishop), mat));
+
       const slit = accentMesh(cached('staunton.bishop.slit', () => new THREE.BoxGeometry(0.019, 0.175, 0.07)), color, matSet);
       slit.position.set(0, 0.632, 0.108);
       slit.rotation.set(-0.30, 0, 0.52);
@@ -573,12 +542,15 @@ function buildStaunton(role, color, matSet) {
 
     case 'queen': {
       g.add(mesh(latheGeometry('staunton.queen', PROFILES.queen), mat));
+
       const point = cached('staunton.queen.point', () => {
         const c = new THREE.ConeGeometry(0.0315, 0.075, 12, 1);
         c.translate(0, 0.0375, 0);
         return c;
       });
+
       const n = 9;
+
       for (let i = 0; i < n; i++) {
         const a = (i / n) * Math.PI * 2;
         const m = mesh(point, mat);
@@ -590,11 +562,14 @@ function buildStaunton(role, color, matSet) {
 
     case 'king': {
       g.add(mesh(latheGeometry('staunton.king', PROFILES.king), mat));
+
       const orb = mesh(cached('staunton.king.orb', () => new THREE.SphereGeometry(0.055, 24, 16)), mat);
       orb.position.y = 1.038;
       g.add(orb);
-      // Double cross: reads as a cross from the seat AND as a plus from straight above.
+
+      // a double cross reads as a cross from the seat and as a plus from above
       const cross = crossGeometry('staunton.king.cross', 0.0625, 0.0675, 0.042, 0.042, 0.006);
+
       for (const ry of [0, Math.PI / 2]) {
         const m = mesh(cross, mat);
         m.position.y = HEIGHTS.king - 0.0735;   // half-height + bevelSize: the tip lands on HEIGHTS.king
@@ -606,30 +581,37 @@ function buildStaunton(role, color, matSet) {
 
     case 'knight': {
       g.add(mesh(latheGeometry('staunton.knight.base', KNIGHT_BASE_PROFILE), mat));
+
       const head = mesh(knightHeadGeometry(), mat);
       head.rotation.y = -Math.PI / 2;            // silhouette's +X (muzzle) -> world +Z
       head.position.y = KNIGHT_BASE_TOP;
+
       // cheeks: two flattened bulges so the carved head is not a slab from the front
       const cheek = cached('staunton.knight.cheek', () => {
         const s = new THREE.SphereGeometry(0.052, 18, 14);
         s.scale(1.55, 1.85, 0.55);
         return s;
       });
+
       for (const side of [-1, 1]) {
         const c = mesh(cheek, mat);
         c.position.set(0.045, 0.205, side * 0.118);
         head.add(c);
       }
+
       const eye = cached('staunton.knight.eye', () => new THREE.SphereGeometry(0.0155, 12, 10));
       const nostril = cached('staunton.knight.nostril', () => new THREE.SphereGeometry(0.010, 10, 8));
+
       for (const side of [-1, 1]) {
         const e = accentMesh(eye, color, matSet);
         e.position.set(0.108, 0.330, side * 0.128);
         head.add(e);
+
         const nz = accentMesh(nostril, color, matSet);
         nz.position.set(0.242, 0.292, side * 0.055);
         head.add(nz);
       }
+
       g.add(head);
       break;
     }
@@ -637,26 +619,30 @@ function buildStaunton(role, color, matSet) {
     default:
       throw new Error('createPiece: unknown role ' + role);
   }
+
   addContactShadow(g, CONTACT_RADIUS[role], matSet);
+
   return g;
 }
 
-// ---------------------------------------------------------------------------------------------
-// 'minimal' -- same height ladder, honest primitives.
+// 'minimal': the same height ladder in plain primitives
 
 const MIN_SEG = 56;
 
 function minimalBase(g, mat, r, h) {
   const plinth = mesh(cached(`minimal.plinth.${r}`, () => new THREE.CylinderGeometry(r + 0.03, r + 0.09, 0.05, MIN_SEG)), mat);
   plinth.position.y = 0.025;
+
   const shaft = mesh(cached(`minimal.shaft.${r}.${h}`, () => new THREE.CylinderGeometry(r, r, h, MIN_SEG)), mat);
   shaft.position.y = h / 2;
+
   g.add(plinth, shaft);
 }
 
 function buildMinimal(role, color, matSet) {
   const g = pieceGroup(role, color, 'minimal');
   const mat = pieceMaterial(color, matSet);
+
   switch (role) {
     case 'pawn': {
       minimalBase(g, mat, 0.125, 0.41);
@@ -665,6 +651,7 @@ function buildMinimal(role, color, matSet) {
       g.add(cap);
       break;
     }
+
     case 'rook': {
       minimalBase(g, mat, 0.155, 0.55);
       const cap = mesh(cached('minimal.rook.cap', () => new THREE.BoxGeometry(0.33, 0.15, 0.33)), mat);
@@ -672,6 +659,7 @@ function buildMinimal(role, color, matSet) {
       g.add(cap);
       break;
     }
+
     case 'bishop': {
       minimalBase(g, mat, 0.145, 0.55);
       const cap = mesh(cached('minimal.bishop.cap', () => new THREE.ConeGeometry(0.175, 0.33, MIN_SEG)), mat);
@@ -679,26 +667,35 @@ function buildMinimal(role, color, matSet) {
       g.add(cap);
       break;
     }
+
     case 'knight': {
       minimalBase(g, mat, 0.145, 0.46);
       const wedge = mesh(cached('minimal.knight.wedge', () => {
         const s = new THREE.Shape();
-        s.moveTo(-0.17, 0); s.lineTo(0.215, 0); s.lineTo(-0.17, 0.34); s.closePath();
+        s.moveTo(-0.17, 0);
+        s.lineTo(0.215, 0);
+        s.lineTo(-0.17, 0.34);
+        s.closePath();
+
         const geo = new THREE.ExtrudeGeometry(s, { depth: 0.20, bevelEnabled: true, bevelThickness: 0.02, bevelSize: 0.016, bevelSegments: 3 });
         geo.translate(0, 0, -0.10);
+
         geo.computeBoundingBox();                       // the bevel overshoots the authored apex
         const bb = geo.boundingBox;
         geo.translate(0, -bb.min.y, 0);
         geo.scale(1, 0.34 / (bb.max.y - bb.min.y), 1);
         geo.computeBoundingBox();
         geo.computeBoundingSphere();
+
         return geo;
       }), mat);
+
       wedge.rotation.y = -Math.PI / 2;                    // point of the wedge -> +Z
       wedge.position.y = 0.46;                            // top 0.80
       g.add(wedge);
       break;
     }
+
     case 'queen': {
       minimalBase(g, mat, 0.155, 0.80);
       const cap = mesh(cached('minimal.queen.cap', () => new THREE.OctahedronGeometry(0.155, 0)), mat);
@@ -706,6 +703,7 @@ function buildMinimal(role, color, matSet) {
       g.add(cap);
       break;
     }
+
     case 'king': {
       minimalBase(g, mat, 0.165, 0.88);
       const v = mesh(cached('minimal.king.crossV', () => new THREE.BoxGeometry(0.075, 0.30, 0.075)), mat);
@@ -715,16 +713,17 @@ function buildMinimal(role, color, matSet) {
       g.add(v, h);
       break;
     }
+
     default:
       throw new Error('createPiece: unknown role ' + role);
   }
+
   addContactShadow(g, CONTACT_RADIUS[role], matSet);
+
   return g;
 }
 
-// ---------------------------------------------------------------------------------------------
-// 'glyph' -- the 2D token. Disc (piece colour) + bezel ring (accent colour) + the cburnett glyph with
-// a contrast halo, lying flat. Reads upright from White's seat; the layer flips it for Black.
+// 'glyph': the flat 2D token, upright from White's seat
 
 const glyphTextures = new Map();   // cache key -> Promise<CanvasTexture>
 const glyphMaterials = new Map();  // cache key -> MeshBasicMaterial (shared by every card of that glyph)
@@ -750,60 +749,78 @@ function paintHalo(ctx, img, size, halo, width) {
   const sil = document.createElement('canvas');
   sil.width = sil.height = size;
   const sctx = sil.getContext('2d');
+
   if (!ctxCanDraw(sctx)) return false;
+
   sctx.drawImage(img, pad, pad, inner, inner);
   sctx.globalCompositeOperation = 'source-in';
   sctx.fillStyle = halo;
   sctx.fillRect(0, 0, size, size);
+
   const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [0.71, 0.71], [-0.71, 0.71], [0.71, -0.71], [-0.71, -0.71]];
+
   for (const r of [width, width * 0.55]) {
     for (const [dx, dy] of dirs) ctx.drawImage(sil, dx * r, dy * r, size, size);
   }
+
   ctx.drawImage(img, pad, pad, inner, inner);
+
   return true;
 }
 
-/**
- * Rasterise one glyph from its inline SVG into a cached CanvasTexture. Browser only.
- * @param {string} id   glyph id ('wK'..'bP')
- * @param {number} size px
- * @param {{halo?:string, haloWidth?:number, viewBox?:string}|null} opts
- * @returns {Promise<THREE.CanvasTexture>}
- */
+/** Rasterise one glyph from its inline SVG into a cached CanvasTexture (browser only). */
 export function getGlyphTexture(id, size = 256, opts = null) {
   const key = texKey(id, size, opts);
   let p = glyphTextures.get(key);
+
   if (p) return p;
+
   p = new Promise((resolve, reject) => {
-    if (typeof Image === 'undefined' || typeof document === 'undefined') { reject(new Error('getGlyphTexture: no DOM')); return; }
+    if (typeof Image === 'undefined' || typeof document === 'undefined') {
+      reject(new Error('getGlyphTexture: no DOM'));
+      return;
+    }
+
     const img = new Image();
+
     img.onload = () => {
       try {
         const canvas = document.createElement('canvas');
         canvas.width = canvas.height = size;
         const ctx = canvas.getContext('2d');
         let painted = false;
+
         if (opts && opts.halo && ctxCanDraw(ctx)) {
           painted = paintHalo(ctx, img, size, opts.halo, opts.haloWidth || Math.max(3, Math.round(size / 26)));
         }
+
         if (!painted) ctx.drawImage(img, 0, 0, size, size);
+
         const tex = new THREE.CanvasTexture(canvas);
         tex.colorSpace = THREE.SRGBColorSpace;
         tex.anisotropy = 8;
         tex.needsUpdate = true;
         resolve(tex);
-      } catch (err) { fail(err instanceof Error ? err : new Error(String(err))); }
+      } catch (err) {
+        fail(err instanceof Error ? err : new Error(String(err)));
+      }
     };
-    img.onerror = () => { fail(new Error('getGlyphTexture: failed to rasterise ' + id)); };
+
+    img.onerror = () => {
+      fail(new Error('getGlyphTexture: failed to rasterise ' + id));
+    };
+
     img.src = glyphDataUrl(id, size, opts && opts.viewBox ? { viewBox: opts.viewBox } : undefined);
+
     function fail(err) {
-      // Do NOT keep a rejected promise in the cache: one transient rasterise failure would otherwise
-      // leave that piece type as a bare disc for the whole session (nothing else clears the cache).
+      // a failure is not cached, so the next card retries
       if (glyphTextures.get(key) === p) glyphTextures.delete(key);
       reject(err);
     }
   });
+
   glyphTextures.set(key, p);
+
   return p;
 }
 
@@ -811,22 +828,36 @@ export function getGlyphTexture(id, size = 256, opts = null) {
 function loadGlyphInto(m, id, opts) {
   if (typeof Image === 'undefined' || typeof document === 'undefined') return;
   if (m.userData.glyphLoading) return;
+
   m.userData.glyphLoading = true;
+
   getGlyphTexture(id, 320, opts)
-    .then((tex) => { m.userData.glyphLoading = false; m.map = tex; m.opacity = 1; m.needsUpdate = true; requestRedraw('content'); })
-    .catch((err) => { m.userData.glyphLoading = false; if (typeof console !== 'undefined') console.warn(String(err)); });
+    .then((tex) => {
+      m.userData.glyphLoading = false;
+      m.map = tex;
+      m.opacity = 1;
+      m.needsUpdate = true;
+      requestRedraw('content');
+    })
+    .catch((err) => {
+      m.userData.glyphLoading = false;
+      if (typeof console !== 'undefined') console.warn(String(err));
+    });
 }
 
 function glyphCardMaterial(id, color) {
   const opts = { halo: TOKEN_HALO[color === 'black' ? 'black' : 'white'], viewBox: TOKEN_VIEWBOX };
   const key = texKey(id, 320, opts);
   let m = glyphMaterials.get(key);
+
   if (!m) {
     m = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, toneMapped: false, alphaTest: 0.04 });
     m.name = 'glyph.' + id;
     glyphMaterials.set(key, m);
   }
+
   if (!m.map) loadGlyphInto(m, id, opts);   // first card, or a retry after a previous failure
+
   return m;
 }
 
@@ -834,9 +865,11 @@ function buildGlyph(role, color, matSet) {
   const g = pieceGroup(role, color, 'glyph');
   const mat = pieceMaterial(color, matSet);
   g.add(mesh(latheGeometry('glyph.disc', GLYPH_DISC_PROFILE, 72), mat));
+
   const bezel = mesh(latheGeometry('glyph.bezel', GLYPH_BEZEL_PROFILE, 72), accentMaterial(color, matSet), true);
   bezel.userData.accent = true;
   g.add(bezel);
+
   const id = glyphId(role, color);
   const card = new THREE.Mesh(cached('glyph.card', () => new THREE.PlaneGeometry(0.56, 0.56)), glyphCardMaterial(id, color));
   card.rotation.x = -Math.PI / 2;   // lie flat, texture top toward -Z
@@ -847,13 +880,13 @@ function buildGlyph(role, color, matSet) {
   card.userData.keepMaterial = true;
   card.userData.glyphCard = true;
   g.add(card);
+
   addContactShadow(g, GLYPH_CONTACT_RADIUS, matSet);
+
   return g;
 }
 
-// ---------------------------------------------------------------------------------------------
-// glTF sets: the ones a user adds from a file, and the modelled sets shipped with the board
-// (modeledSets.js -- built in Blender, one Draco-compressed GLB each, loaded on first use).
+// glTF sets: a user's own files and the modelled sets shipped with the board
 
 const gltfSets = new Map();  // id -> { id, name, kind, keepMaterials, protos: { role: { white, black } }, materials }
 const modeledLoads = new Map();   // id -> Promise<true> while a modelled set is loading
@@ -862,19 +895,15 @@ const UNLIT_SHAPE = { shape: true, flatMetal: true };   // setMaterialUnlit: kee
 const MAP_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'clearcoatNormalMap'];
 const SET_ANISOTROPY = 8;
 
+/** Deep-clone a node with its world transform baked into the clone's local transform. */
 function bakeWorld(node) {
-  // Deep-clone a node and bake its world transform (relative to the glTF root) into the clone's local transform.
   const c = node.clone(true);
   c.matrix.copy(node.matrixWorld);
   c.matrix.decompose(c.position, c.quaternion, c.scale);
   return c;
 }
 
-/**
- * Decal radius per unit of foot radius. The contact gradient (materials.js) is dense to ~0.73 of the decal and
- * then falls off, so at 1.38x the foot's edge lands on that shoulder -- the same ratio CONTACT_RADIUS gives the
- * built-in pieces.
- */
+/** Decal radius per unit of foot radius: the foot's edge lands on the gradient's shoulder. */
 const CONTACT_SPREAD = 1.38;
 
 /** Radius of the contact-shadow decal for a piece: its foot (what touches the board) times CONTACT_SPREAD. */
@@ -882,39 +911,46 @@ function footprintRadius(root) {
   let r = 0;
   const v = new THREE.Vector3();
   root.updateMatrixWorld(true);
+
   root.traverse((o) => {
     const pos = o.isMesh && o.geometry && o.geometry.attributes.position;
+
     if (!pos) return;
+
     const step = Math.max(1, Math.floor(pos.count / 30000));
+
     for (let i = 0; i < pos.count; i += step) {
       v.fromBufferAttribute(pos, i).applyMatrix4(o.matrixWorld);
       if (v.y < 0.03) r = Math.max(r, Math.hypot(v.x, v.z));
     }
   });
+
   return Math.min(MAX_PIECE_RADIUS - 0.005, Math.max(0.2, r * CONTACT_SPREAD));
 }
 
+/** Wrap in a group scaled by s, bottom on y = 0, centred in x/z unless keepOrigin. */
 function normalise(node, s, keepOrigin = false) {
-  // Wrap in a group scaled by s and stand the bottom on y = 0. By default the bounding box is also centred in
-  // x/z (a user file can put its pieces anywhere). keepOrigin keeps the authored x/z origin instead: the
-  // modelled sets author every piece at its base centre, and a knight's bounding box is NOT its base (the
-  // head reaches forward), so centring the box would push the foot off the square.
   const inner = new THREE.Group();
   inner.add(node);
   inner.scale.setScalar(s);
   inner.updateMatrixWorld(true);
+
   const box = new THREE.Box3().setFromObject(inner);
+
   if (keepOrigin) {
     inner.position.set(0, -box.min.y, 0);
   } else {
     const c = box.getCenter(new THREE.Vector3());
     inner.position.set(-c.x, -box.min.y, -c.z);
   }
+
   inner.updateMatrixWorld(true);
+
   inner.userData.contactRadius = keepOrigin ? footprintRadius(inner) : Math.min(
     MAX_PIECE_RADIUS - 0.01,
     Math.max(0.22, 0.62 * Math.max(box.max.x - box.min.x, box.max.z - box.min.z)),
   );
+
   return inner;
 }
 
@@ -924,16 +960,7 @@ function gltfLoader() {
   return loader;
 }
 
-/**
- * Load a glTF/GLB and register it as a piece set. mapping maps each role to a node name, or to
- * { white, black } node names. Pieces are scaled so the king is HEIGHTS.king tall (times `scale`),
- * centred on their base. Colour comes from matSet piece materials unless keepMaterials.
- * Extra options (the modelled sets use them): `data` (an ArrayBuffer instead of url/file), `blackFrom` (a node
- * whose material the black pieces take -- the white pieces keep the file's own), `keepOrigin` (see normalise),
- * `kind` (what listSets reports), `proxyData` (a GLB of low-detail stand-ins with the same node names; see
- * addStandIns).
- * @returns {Promise<{id, name, kind, keepMaterials, roles:string[]}>}
- */
+/** Load a glTF/GLB and register it as a piece set; mapping maps each role to a node name or { white, black }. */
 export async function registerGltfSet({
   id, name, url, file, data, mapping, scale = 1, keepMaterials = false, blackFrom = null, keepOrigin = false, kind = 'gltf',
   proxyData = null,
@@ -944,20 +971,30 @@ export async function registerGltfSet({
   for (const role of ROLES) if (!mapping[role]) throw new Error(`registerGltfSet: mapping.${role} is missing`);
 
   let gltf;
+
   if (data) {
     gltf = await new Promise((resolve, reject) => gltfLoader().parse(data, '', resolve, reject));
   } else {
     let src = url, objectUrl = null;
-    if (file) { objectUrl = URL.createObjectURL(file); src = objectUrl; }
+
+    if (file) {
+      objectUrl = URL.createObjectURL(file);
+      src = objectUrl;
+    }
+
     if (!src) throw new Error('registerGltfSet: url, file or data is required');
+
     try {
       gltf = await gltfLoader().loadAsync(src);
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   }
+
   const root = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+
   if (!root) throw new Error(`registerGltfSet: '${id}' has no scene`);
+
   root.updateMatrixWorld(true);
 
   const find = (nm) => {
@@ -965,79 +1002,107 @@ export async function registerGltfSet({
     if (!n) throw new Error(`glTF set '${id}': node '${nm}' not found`);
     return n;
   };
+
   const nameFor = (role, color) => {
     const m = mapping[role];
     if (typeof m === 'string') return m;
     if (m && typeof m === 'object' && m[color]) return m[color];
     throw new Error(`glTF set '${id}': mapping.${role} needs a node name or { white, black }`);
   };
+
   let blackMaterial = null;
+
   if (blackFrom) {
-    find(blackFrom).traverse((o) => { if (!blackMaterial && o.isMesh) blackMaterial = o.material; });
+    find(blackFrom).traverse((o) => {
+      if (!blackMaterial && o.isMesh) blackMaterial = o.material;
+    });
+
     if (!blackMaterial) throw new Error(`glTF set '${id}': node '${blackFrom}' has no material`);
   }
 
-  // Scale from the (white) king's height so the set keeps its own proportions.
+  // scale from the white king's height so the set keeps its own proportions
   const kingClone = bakeWorld(find(nameFor('king', 'white')));
-  const tmp = new THREE.Group(); tmp.add(kingClone); tmp.updateMatrixWorld(true);
+  const tmp = new THREE.Group();
+  tmp.add(kingClone);
+  tmp.updateMatrixWorld(true);
   const kingBox = new THREE.Box3().setFromObject(tmp);
   const kingH = kingBox.max.y - kingBox.min.y;
+
   if (!(kingH > 0)) throw new Error(`glTF set '${id}': the king node has no size`);
+
   const s = (HEIGHTS.king / kingH) * (scale > 0 ? scale : 1);
 
   const protos = {};
+
   for (const role of ROLES) {
     protos[role] = {};
+
     for (const color of ['white', 'black']) {
       const nm = nameFor(role, color);
+
       if (color === 'black' && nm === nameFor(role, 'white')) {
-        if (!blackMaterial) { protos[role].black = protos[role].white; continue; }   // same node, same look: share
-        const c = protos[role].white.clone(true);                                    // same geometry, black finish
-        c.traverse((o) => { if (o.isMesh) o.material = blackMaterial; });
+        if (!blackMaterial) {
+          protos[role].black = protos[role].white;   // same node, same look: share
+          continue;
+        }
+
+        const c = protos[role].white.clone(true);    // same geometry, black finish
+
+        c.traverse((o) => {
+          if (o.isMesh) o.material = blackMaterial;
+        });
+
         protos[role].black = c;
         continue;
       }
+
       const clone = bakeWorld(find(nm));
+
       clone.traverse((o) => {
         if (o.isMesh) {
-          o.castShadow = true; o.receiveShadow = true;
-          if (keepMaterials) { o.userData.keepMaterial = true; o.userData.ownFinish = true; }
+          o.castShadow = true;
+          o.receiveShadow = true;
+
+          if (keepMaterials) {
+            o.userData.keepMaterial = true;
+            o.userData.ownFinish = true;
+          }
+
           if (color === 'black' && blackMaterial) o.material = blackMaterial;
         }
       });
+
       protos[role][color] = normalise(clone, s, keepOrigin);
     }
   }
+
   const materials = new Set();
+
   for (const role of ROLES) for (const color of ['white', 'black']) {
     protos[role][color].traverse((o) => {
       if (o.isMesh) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m && materials.add(m));
     });
   }
+
   const set = { id, name: name || id, kind, keepMaterials: !!keepMaterials, protos, roles: ROLES.slice(), materials: Array.from(materials) };
-  // A set that keeps its own materials still takes the dither every lit material in the app gets (no banding in
-  // the long soft gradients of a turned piece), and its maps anisotropic filtering: a turned shaft is seen edge-on
-  // at its sides, where plain mipmaps smear Estate's window bands into pinstripes (critique r4). three clamps the
-  // value to what the GPU offers.
+
+  // own materials still get the app's dither and anisotropic map filtering
   if (set.keepMaterials) {
     for (const m of set.materials) {
       m.dithering = true;
       for (const k of MAP_KEYS) if (m[k]) m[k].anisotropy = SET_ANISOTROPY;
     }
   }
-  // The last await comes before the lighting state is read, so a lighting toggle cannot fall between the two.
+
+  // the last await comes before the lighting state is read
   if (proxyData) await addStandIns(set, proxyData, nameFor);
   if (set.keepMaterials && setsUnlit) for (const m of set.materials) setMaterialUnlit(m, true, UNLIT_SHAPE);
+
   unregisterSet(id);
   gltfSets.set(id, set);
+
   return { id: set.id, name: set.name, kind: set.kind, keepMaterials: set.keepMaterials, roles: set.roles };
 }
-
-// Low-detail stand-ins. The shadow map and the edge-light mask do not need a modelled piece's full detail, so a set
-// can bring a second GLB of simplified copies (modeledSets.js `proxy`). Each one sits beside the full mesh inside
-// the proto's normalised group, so every clone carries it and it follows every move, lift, turn and fade of the
-// piece with no extra code. It is hidden and never picked; the view shows it in the full mesh's place only while
-// the shadow map or the mask is drawn (scene.js, silhouette.js).
 
 const STAND_IN_MATERIAL = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });   // never drawn
 STAND_IN_MATERIAL.name = 'piece.standIn';
@@ -1049,22 +1114,21 @@ export function standInOf(mesh) {
   return (mesh && standIns.get(mesh)) || null;
 }
 
-/**
- * Run `draw` with every visible piece mesh under `root` that has a stand-in swapped for it: the full mesh hidden,
- * its stand-in shown wearing the full mesh's material. Everything is put back afterwards, also when `draw` throws.
- * Returns what `draw` returns. The view draws the shadow map this way (scene.js).
- */
+/** Run `draw` with every visible piece mesh under `root` swapped for its stand-in; always restores. */
 export function drawWithStandIns(root, draw) {
   const swap = [];   // full mesh, stand-in, the stand-in's own material
+
   root.traverseVisible((o) => {
     const s = o.isMesh && !Array.isArray(o.material) ? standInOf(o) : null;
     if (s) swap.push(o, s, s.material);
   });
+
   for (let i = 0; i < swap.length; i += 3) {
     swap[i + 1].material = swap[i].material;
     swap[i + 1].visible = true;
     swap[i].visible = false;
   }
+
   try {
     return draw();
   } finally {
@@ -1076,30 +1140,35 @@ export function drawWithStandIns(root, draw) {
   }
 }
 
-/**
- * Put each proto's stand-in from `proxyData` beside its full mesh: the node of the same name, with its own baked
- * transform, inside the group normalise() made -- so it takes exactly the full mesh's scale and placement. A file
- * that cannot be read gives no stand-ins, and a missing node leaves that piece without one: the full mesh then
- * draws the shadow and the mask, as it always did.
- */
+/** Put each proto's stand-in from `proxyData` beside its full mesh, inside the normalised group. */
 async function addStandIns(set, proxyData, nameFor) {
   let root = null;
+
   try {
     const gltf = await new Promise((resolve, reject) => gltfLoader().parse(proxyData, '', resolve, reject));
     root = gltf.scene || (gltf.scenes && gltf.scenes[0]) || null;
   } catch (err) {
     return;
   }
+
   if (!root) return;
+
   root.updateMatrixWorld(true);
+
   const done = new Set();
+
   for (const role of ROLES) for (const color of ['white', 'black']) {
     const proto = set.protos[role][color];
+
     if (done.has(proto)) continue;
+
     done.add(proto);
+
     const full = proto.children[0];
     const node = root.getObjectByName(nameFor(role, color));
+
     if (!full || !full.isMesh || !node || !node.isMesh) continue;
+
     const s = bakeWorld(node);
     s.name = full.name + '.standIn';
     s.material = STAND_IN_MATERIAL;
@@ -1114,14 +1183,23 @@ async function addStandIns(set, proxyData, nameFor) {
 /** Remove a registered glTF set and dispose its geometry (and its own materials and maps when keepMaterials). */
 export function unregisterSet(id) {
   const set = gltfSets.get(id);
+
   if (!set) return false;
+
   const seen = new Set();
+
   for (const role of ROLES) for (const color of ['white', 'black']) {
     const p = set.protos[role][color];
+
     if (!p || seen.has(p)) continue;
+
     seen.add(p);
-    p.traverse((o) => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+
+    p.traverse((o) => {
+      if (o.isMesh && o.geometry) o.geometry.dispose();
+    });
   }
+
   if (set.keepMaterials) {
     for (const m of set.materials) {
       for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap']) {
@@ -1130,7 +1208,9 @@ export function unregisterSet(id) {
       m.dispose();
     }
   }
+
   gltfSets.delete(id);
+
   return true;
 }
 
@@ -1139,14 +1219,14 @@ export function isModeledSet(id) {
   return !!modeledSet(id);
 }
 
-/**
- * Make sure a modelled set is loaded (a no-op for any other id). Resolves true once createPiece can build
- * it; a failed load is not cached, so choosing the set again retries.
- */
+/** Make sure a modelled set is loaded; resolves true once createPiece can build it. A failure is not cached. */
 export function ensureModeledSet(id) {
   const entry = modeledSet(id);
+
   if (!entry || gltfSets.has(id)) return Promise.resolve(true);
+
   let p = modeledLoads.get(id);
+
   if (!p) {
     p = Promise.all([loadSetBytes(entry), loadProxyBytes(entry)])   // the stand-ins load alongside; null without
       .then(([data, proxyData]) => {
@@ -1157,20 +1237,26 @@ export function ensureModeledSet(id) {
           keepOrigin: true, kind: 'model', proxyData,
         });
       })
-      .then(() => { modeledLoads.delete(id); requestRedraw('content'); return true; }, (err) => { modeledLoads.delete(id); throw err; });
+      .then(() => {
+        modeledLoads.delete(id);
+        requestRedraw('content');
+        return true;
+      }, (err) => {
+        modeledLoads.delete(id);
+        throw err;
+      });
+
     modeledLoads.set(id, p);
   }
+
   return p;
 }
 
-/**
- * Lighting "off": set-owned materials go flat the way the theme's do (materials.js setMaterialUnlit), but keep
- * their baked ambient occlusion (the GLB's ORM texture), so a pale set still shows where one form meets another
- * instead of reading as a milky silhouette; a metal's patina is pulled toward one colour (flatMetal).
- */
+/** Lighting "off" for set-owned materials, keeping their baked occlusion and flattening metal. */
 export function setSetsUnlit(on) {
   setsUnlit = !!on;
   requestRedraw('content');
+
   for (const set of gltfSets.values()) {
     if (!set.keepMaterials) continue;
     for (const m of set.materials) setMaterialUnlit(m, setsUnlit, UNLIT_SHAPE);
@@ -1182,18 +1268,18 @@ function buildGltf(set, role, color, matSet) {
   const proto = set.protos[role][color];
   const obj = proto.clone(true);
   const standIn = obj.children.find((c) => c.userData.standIn);
+
   if (standIn && obj.children[0].isMesh) {
     standIn.raycast = skipRaycast;   // picking, hover and drag see only the full mesh
     standIns.set(obj.children[0], standIn);
   }
+
   g.add(obj);
   applyMaterials(g, matSet || { whitePiece: FALLBACK.white, blackPiece: FALLBACK.black });   // the theme's finish
   addContactShadow(g, proto.userData.contactRadius || CONTACT_RADIUS[role], matSet);
+
   return g;
 }
-
-// ---------------------------------------------------------------------------------------------
-// Public surface.
 
 /** All sets: the built-ins plus every registered glTF set. */
 export function listSets() {
@@ -1206,7 +1292,9 @@ export function listSets() {
 /** 'builtin' | 'model' | 'gltf' | null (unknown, or a modelled set that has not finished loading). */
 export function setKind(id) {
   if (BUILTIN_SETS.some((s) => s.id === id)) return 'builtin';
+
   const s = gltfSets.get(id);
+
   if (s) return s.kind === 'model' ? 'model' : 'gltf';
   return null;
 }
@@ -1216,69 +1304,87 @@ export function isDirectional(id) {
   return id !== 'glyph';
 }
 
-/**
- * Where a set's bishop has its mitre cut, as an azimuth in the piece's own frame (0 = +Z, the side it is authored
- * facing; PI/2 = +X), or null for a bishop without one to show (Cairn's slot runs right through the stone and reads
- * from both seats; Menagerie's is an owl; the minimal set's a plain cone). The layer turns the cut three-quarter
- * toward its owner (pieceLayer.js, Facing). Checked by orbiting a lone bishop of each set (shoot.mjs piece views).
- */
+/** The azimuth of a set's bishop mitre cut in the piece's frame (0 = +Z), or null for none to show. */
 const BISHOP_CUT = { staunton: 0, classic: Math.PI / 2, beton: Math.PI / 2, estate: Math.PI / 2 };
+
 export function bishopCut(id) {
   return Object.prototype.hasOwnProperty.call(BISHOP_CUT, id) ? BISHOP_CUT[id] : null;
 }
 
 const warned = new Set();
 
-/**
- * Build one piece as a THREE.Group (origin at base centre, y = 0, userData { role, color, square: null }).
- * Unknown set ids fall back to 'staunton' with a single console warning.
- */
+/** Build one piece as a THREE.Group at its base centre; unknown set ids fall back to 'staunton'. */
 export function createPiece(role, color, setId = 'staunton', matSet = null) {
   if (!ROLES.includes(role)) throw new Error('createPiece: unknown role ' + role);
   if (color !== 'white' && color !== 'black') throw new Error('createPiece: unknown color ' + color);
+
   const gltf = gltfSets.get(setId);
+
   if (gltf) return buildGltf(gltf, role, color, matSet);
+
   let id = setId;
+
   if (setKind(id) !== 'builtin') {
-    if (!warned.has(id) && typeof console !== 'undefined') { console.warn(`createPiece: unknown piece set '${id}', using staunton`); warned.add(id); }
+    if (!warned.has(id) && typeof console !== 'undefined') {
+      console.warn(`createPiece: unknown piece set '${id}', using staunton`);
+      warned.add(id);
+    }
+
     id = 'staunton';
   }
+
   if (id === 'minimal') return buildMinimal(role, color, matSet);
   if (id === 'glyph') return buildGlyph(role, color, matSet);
   return buildStaunton(role, color, matSet);
 }
 
-/**
- * Point every mesh of a piece at the right material of `matSet`, by userData.color.
- * Insets (`userData.accent`) take the accent material and contact shadows take matSet.contactShadow,
- * so a theme change repaints them too; a modelled set's meshes (`ownFinish`) take the theme's finish over their
- * own detail, or their own material back in wood; anything else flagged `keepMaterial` is left alone.
- */
+/** Point every mesh of a piece at the right material of `matSet`, honouring the mesh userData flags. */
 export function applyMaterials(pieceObj, matSet) {
   if (!pieceObj || !matSet) return;
   const color = pieceObj.userData && pieceObj.userData.color;
   const mat = color === 'black' ? matSet.blackPiece : matSet.whitePiece;
   const accent = accentMaterial(color, matSet);
   const contact = contactMaterial(matSet);
+
   if (!mat) return;
+
   pieceObj.traverse((o) => {
     if (!o.isMesh) return;
+
     const ud = o.userData || {};
-    if (ud.contactShadow) { o.material = contact; return; }
-    if (ud.accent) { o.material = accent; return; }
-    if (ud.ownFinish) { o.material = modeledFinish(o.material, color, matSet); return; }
+
+    if (ud.contactShadow) {
+      o.material = contact;
+      return;
+    }
+
+    if (ud.accent) {
+      o.material = accent;
+      return;
+    }
+
+    if (ud.ownFinish) {
+      o.material = modeledFinish(o.material, color, matSet);
+      return;
+    }
+
     if (ud.keepMaterial) return;
+
     o.material = mat;
   });
 }
 
 const ownFinishOf = new WeakMap();   // a theme's finish on a modelled set -> the set's own material under it
-/** The material a modelled set's mesh should wear under `matSet` (see the ownFinish flag above). */
+
+/** The material a modelled set's mesh should wear under `matSet`. */
 function modeledFinish(current, color, matSet) {
   const own = ownFinishOf.get(current) || current;
   const themed = matSet && typeof matSet.modeledPiece === 'function' ? matSet.modeledPiece(color, own) : null;
+
   if (!themed) return own;
+
   ownFinishOf.set(themed, own);
+
   return themed;
 }
 
@@ -1286,7 +1392,12 @@ function modeledFinish(current, color, matSet) {
 export function disposePieceCaches() {
   for (const g of geoCache.values()) g.dispose();
   geoCache.clear();
-  for (const m of glyphMaterials.values()) { if (m.map) m.map.dispose(); m.dispose(); }
+
+  for (const m of glyphMaterials.values()) {
+    if (m.map) m.map.dispose();
+    m.dispose();
+  }
+
   glyphMaterials.clear();
   glyphTextures.clear();
 }

@@ -1,8 +1,3 @@
-// ai/prompt.js - the system prompt for the local / anthropic providers.
-// Owns: SYSTEM_PROMPT (coach persona + how to read the packet + the single ```chess block contract).
-// Added beyond the contract: PACKET_GUIDE and CHESS_BLOCK_INSTRUCTION are exported on their own,
-// and buildSystemPrompt(extra) appends per-session text without editing the constant.
-
 const F = '```';
 
 export const PACKET_GUIDE = [
@@ -45,7 +40,7 @@ export const SYSTEM_PROMPT = [
   CHESS_BLOCK_INSTRUCTION,
 ].join('\n');
 
-/** Returns SYSTEM_PROMPT with optional extra text appended (for example a per-study persona). */
+/** SYSTEM_PROMPT with optional extra text appended, such as a per-study persona. */
 export function buildSystemPrompt(extra = '') {
   const more = String(extra || '').trim();
   return more ? SYSTEM_PROMPT + '\n\n' + more : SYSTEM_PROMPT;
