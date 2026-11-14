@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+blender/work/
+__pycache__/
+*.pyc
+.DS_Store
+/chessboard.html

@@ -1,0 +1,26 @@
+[package]
+name = "rukh"
+description = "Rukh: one chess game shared by a 3D board in the browser and any AI connected over MCP."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rukh"
+path = "src/main.rs"
+
+[dependencies]
+rukh-core = { path = "../rukh-core" }
+rmcp = { version = "3.10.0", features = ["server", "macros", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "fs"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json"] }
+webbrowser = "1.2.7"
+# Same version axum uses; only read to recognise an oversized WebSocket message.
+tungstenite = { version = "0.29", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+reqwest = { version = "0.13.5", default-features = false }

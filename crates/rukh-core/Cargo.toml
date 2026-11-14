@@ -1,0 +1,11 @@
+[package]
+name = "rukh-core"
+description = "The game behind Rukh: chess rules, the variation tree, notes and drawings. Builds natively and to WebAssembly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+shakmaty = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
