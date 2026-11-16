@@ -31,6 +31,55 @@ After each change it publishes the full frame on a watch channel. A late or slow
 
 If a thread panics while holding the lock, the lock is taken anyway. This is safe: a refused intent changes nothing, and an applied one is published before the lock is released, so the table is always in a consistent state.
 
+## Tabs
+
+The hub holds a desk of tabs (see `core.md`), each a whole table. One tab is selected, and every view shows it. The page has no way to make a second tab. With one tab, the hub, presence and MCP behave as described in the rest of this file.
+
+The hub's entry points:
+
+- `apply`, `read`, `latest` and `subscribe` mean the selected tab. The socket uses `apply`, so a view's intent lands on the selected tab. The socket does not accept tab intents.
+- `apply_on` and `read_on` name a tab, shown or not. MCP uses them.
+- `apply_desk` takes tab intents, and game intents for the tab they name. Only the tests call it.
+
+A change on any tab raises the one `rev` and republishes the selected tab's frame. Hidden changes cost a resend, but they keep the marks current, and they wake every `wait`, which then looks at its own tab.
+
+### Presence
+
+One AI match is played at a time. Presence remembers the tab it is on, and seat holders belong to that tab. After a change, the hub checks the holders against that tab's table only, so a move on another tab never clears them. Closing the tab clears them.
+
+A seat claim on another tab is refused while the AI match's tab has a held AI seat and its game has no result: "An AI is already playing on «Board 1»." A `play` for an AI seat of a match on another tab gets the same refusal, since moving for a seat holds it. A finished game does not block. Each AI entry in the presence message carries `tab`, the tab of its seat, or `null`.
+
+The check, the claim or move, and the hold are made under one desk lock (`Hub::apply_seated`), so two AIs claiming seats on two tabs at once end with one match and one holder.
+
+A holder that has dropped out of the presence list (an AI silent for longer than the listing time) no longer counts as holding. Its seat can then be taken on its own tab, or by a claim on another tab, which moves the AI match there.
+
+After mate the holder stays listed with its seat and tab, but a game with a result does not count as held for this rule.
+
+### An MCP session's tab
+
+Each session keeps which tab it acts on. The tools have no new arguments.
+
+A seated `wait` binds the session to a tab, and every later call acts there, whichever tab is shown. An unbound session takes a seat in this order:
+
+1. the selected tab, if that seat is an AI seat nobody else holds in a match in progress;
+2. otherwise the only tab with such a seat;
+3. otherwise the selected tab, if it is a free tab with no active match and no stored game, where the claim starts a match;
+4. otherwise no seat is taken. The answer comes from the tab of the last binding: on the selected tab the claim runs there; on a hidden tab the game is only read, so a finished game answers `game_over` again.
+
+The binding ends when the tab is closed, when the match is stopped or replaced or the seat is taken away, or when the game at the tip has a result. The `wait` that reports it is the last call that uses it. A claim refused on the bound tab ends it only when that seat is no longer an AI seat of a match in progress. A seat moved to the other colour keeps it. A `wait` with no seat whose bound tab has no seat for it lets the binding go and looks again.
+
+While bound, asking for the other colour while another tab is shown is refused: "You are playing on «Board 1»; finish it or ask the person to stop it." On the bound tab itself the claim runs there. Once the bound match is no longer in progress, the request for the other colour is not refused: the session is unbound and takes a seat by the order above.
+
+When the bound tab is closed, the wait ends with `{"event":"game_over","stopped":"tab_closed"}` and its own sentence. The session is then marked: rules 1 and 2 still apply, rule 3 does not, and a seated `wait` gets the same answer again. An AI that keeps calling `wait` therefore never starts a match on the board the person happens to be showing.
+
+A session with no seat has a cursor: the tab of the last result it was given. `get_game` reads the selected tab and moves the cursor there. `play` and `annotate` act on the cursor's tab, or on the selected one if the session has read nothing yet. If that tab was closed, they answer "That game was closed." So does `get_game` from a bound session whose tab was closed before a `wait` reported it; the session is then marked as closed and unbound, and its next `get_game` reads the selected tab.
+
+A `wait` with no seat uses the bound tab; unbound, it looks for the one AI seat nobody else holds, on the selected tab first, then on the only tab that has one. It never starts a match.
+
+`wait for=any_change` watches the cursor's tab. When the person selects another tab, it returns `changed` with that tab's position, an empty `since_last` and the line "The person switched to another board." The switch result has an empty `since_last`; the old `since` is not used.
+
+Position bodies carry `tab`. A timeout stays `{event, board_rev}`. When the session's tab is not the one shown and a view is open, the line ends with "The person is looking at another board." An AI learns nothing about other tabs.
+
 ## The guard
 
 Every route, including the WebSocket upgrade and `/mcp`, goes through one guard. A request passes only when its `Host` is exactly `127.0.0.1:<port>` or `localhost:<port>`, and its `Origin` is absent or one of those two origins. This stops other websites, including DNS rebinding tricks, from reading or driving the board.

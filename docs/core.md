@@ -13,6 +13,7 @@ There are three layers:
 - `Game` (`lib.rs`) is the rules and the move tree.
 - `Session` (`session.rs`) is the game plus the match: who sits in each seat, the tip, and the AI's style.
 - `Table` (`table.rs`) is the session plus its counters. It is the one place intents are applied and frames are produced.
+- `Desk` (`desk.rs`) is the open boards: several tables, one of them shown.
 
 ## The move tree
 
@@ -124,3 +125,35 @@ The style says what kind of opponent an AI is. The board owns it; the AI obeys i
 The coach rule refers to the annotate rule. `RULE_COACH` alone is only complete next to `RULE_ANNOTATE`, as in the server instructions. `RULE_COACH_IN_FULL` joins both, word for word, for tool results where the annotate rule is not shown. The rule texts are macros so that joined text is built from the same literals at compile time.
 
 Any style text is normalised: case and spaces are ignored, and anything unknown becomes `annotate`.
+
+## Tabs
+
+A desk holds the boards the person has open, as tabs. Each tab is one whole `Table` with an id, a name and a kind. One tab is selected, and every window shows that one. No second board is drawn: selecting a tab changes the game the one board shows.
+
+Tab ids are written `t1`, `t2` and so on. They are handed out in order and never reused, so a late message for a closed tab can never reach a new one. The place of a tab in the list is only its order.
+
+A tab is `free`, `game` or `reps`. The person makes free tabs; the program makes the other two for the coach. A new desk has one free tab, `t1` "Board 1", on the standard position.
+
+The tab intents are `tab_select`, `tab_new` (with an optional `name` and `copy_of`), `tab_rename`, `tab_close` and `tab_move`. They come from views and from the program; an AI is refused. `tab_new` selects the tab it makes. A copy takes the other tab's game and study but not its match. `tab_reopen` is refused with `nothing_closed`: closed tabs are not stored. `tab_close` accepts `abandon` and ignores it. `tab_move` refuses a `to` outside the list with `bad_input`. A rename to the same name, or a select of the tab already shown, changes nothing and leaves `rev` alone.
+
+A game intent may name its tab with `tab`. With no `tab` it lands on the selected tab. A tab that is not open is refused with `unknown_tab`; the message quotes at most 20 characters of what was sent. An intent that has the key `tab` twice is refused with `bad_input`. An intent for a tab that is not shown is still applied.
+
+Default names are "Board 1", "Board 2" and so on, the lowest number no open tab uses. A name is cleaned the way client names are, control and invisible characters removed and spaces collapsed, and cut to 40 characters. A name with nothing visible is refused. Two tabs may share a name. The program names its own tabs with `Desk::open_tab`, which refuses a name with nothing visible and does not select the tab it makes.
+
+At most 12 free tabs can be open. A thirteenth is refused with `tab_limit`, "Close a board first." The coach's game and Reps tabs are neither counted nor refused. Closing the shown tab shows the tab to its right, or else the one to its left. Closing the last tab leaves a fresh "Board 1" under a new id.
+
+### Counters on a desk
+
+The desk owns one `rev` for all its tabs, because a view drops any frame whose `rev` is not above the last one it took. After every change the desk gives each table its `rev` with `Table::set_rev`, so the next intent on any tab lands on the next program-wide value, and a table's own `rev` and frame always agree with the desk. The desk's `rev` starts at 0 and rises by exactly one for each change, on whichever tab, and for each tab change: a select, a new tab, a rename, a close or a move.
+
+Game ids come from one desk counter too. Each new tab, and each new game on any tab, takes the next one, so no two tabs ever hold the same `game_id`, even after a close. `board_rev` stays per tab. A select raises `rev` and no `board_rev`.
+
+A table used on its own starts `rev` at 0 and `game_id` at 1, and a new game takes the next `game_id`.
+
+### The frame
+
+The desk's frame is the selected tab's frame with two more keys, `tab`, the selected tab's id, and `tabs`, the list in order. Each item of the list has `id`, `name`, `kind` and `mark`.
+
+A mark is computed from the tab's table, never stored. It is `your_move` when a match there waits for a person, `waiting` when an AI or the engine is to move, `over` when the game at the match tip has ended, and `null` with no match. `paused` is kept for a paused coach game; no code produces it.
+
+A change on a tab that is not shown still raises `rev`, so the next frame carries the shown tab again with fresh marks. The frame's hint names the last change, on whichever tab it landed.

@@ -11,10 +11,15 @@ use shakmaty::{
 };
 
 pub mod chess960;
+pub mod desk;
 pub mod intent;
 pub mod session;
 pub mod table;
 
+pub use desk::{
+    clean_tab_name, Desk, Mark, Tab, TabEntry, TabId, TabIntent, TabKind, MAX_FREE_TABS,
+    MAX_TAB_NAME_CHARS,
+};
 pub use intent::{AnnotateMode, Intent};
 pub use session::{MatchState, Seat, Seats, Session, Side, Study, Style, StyleInfo};
 pub use table::{
@@ -46,6 +51,12 @@ pub enum Error {
     GameOver(String),
     /// During a match, an AI tried to move for a side it does not hold.
     NotYourTurn(String),
+    /// No open board has this id.
+    UnknownTab(String),
+    /// The free-board limit is reached.
+    TabLimit(String),
+    /// There is no closed board to reopen.
+    NothingClosed(String),
 }
 
 impl Error {
@@ -55,6 +66,9 @@ impl Error {
             Error::Stale(_) => "stale",
             Error::GameOver(_) => "game_over",
             Error::NotYourTurn(_) => "not_your_turn",
+            Error::UnknownTab(_) => "unknown_tab",
+            Error::TabLimit(_) => "tab_limit",
+            Error::NothingClosed(_) => "nothing_closed",
             Error::InvalidFen(_)
             | Error::IllegalPosition(_)
             | Error::UnknownNode(_)
@@ -73,7 +87,10 @@ impl fmt::Display for Error {
             Error::BadInput(why)
             | Error::Stale(why)
             | Error::GameOver(why)
-            | Error::NotYourTurn(why) => write!(f, "{why}"),
+            | Error::NotYourTurn(why)
+            | Error::UnknownTab(why)
+            | Error::TabLimit(why)
+            | Error::NothingClosed(why) => write!(f, "{why}"),
         }
     }
 }

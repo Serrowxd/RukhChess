@@ -4,8 +4,10 @@ This app bundles the following. Their licenses travel with the build (`dist/` an
 
 - **Stockfish 19** — Stockfish.js build by Chess.com, LLC (https://github.com/nmrugg/stockfish.js), based on Stockfish
   (https://github.com/official-stockfish/Stockfish) by T. Romstad, M. Costalba, J. Kiiski, G. Linscott and contributors.
-  Nets by Chris Bao (sscg13). **GNU GPL v3.** Files: `vendor/stockfish-19-lite-single.js`, `vendor/stockfish-19-lite-single.wasm`.
-  Source for the exact build: the `stockfish@19.0.0` npm package.
+  **GNU GPL v3.** Files: `vendor/stockfish-19-lite-single.js`, `vendor/stockfish-19-lite-single.wasm`, unmodified from
+  the `stockfish@19.0.0` npm package; license and notices in `vendor/STOCKFISH-LICENSE.txt`.
+  Source for the exact build: https://github.com/nmrugg/stockfish.js/tree/v19.0.0 (npm gitHead `54fde71`).
+  Embedded net `nn-61e7af4bb97d` by Chris Bao (sscg13), hosted on Stockfish's fishtest, whose upload terms license networks **CC0**.
 - **chessops** — lichess rules library. **GNU GPL v3.** https://github.com/niklasf/chessops
 - **Three.js** — **MIT.** https://github.com/mrdoob/three.js
 - **js-yaml** — **MIT.** https://github.com/nodeca/js-yaml

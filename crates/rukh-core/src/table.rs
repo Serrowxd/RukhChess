@@ -128,11 +128,11 @@ pub struct StateBody {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct Hint {
-    reason: &'static str,
-    by: String,
+pub(crate) struct Hint {
+    pub(crate) reason: &'static str,
+    pub(crate) by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    intent_id: Option<u64>,
+    pub(crate) intent_id: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -312,6 +312,7 @@ pub struct Table {
     rev: u64,
     board_rev: u64,
     game_id: u64,
+    next_game_id: u64,
     recent: VecDeque<Change>,
     /// `(board_rev, by)` of the last [`BUMP_LOG_MAX`] changes that bumped `board_rev`.
     bumps: VecDeque<(u64, String)>,
@@ -773,6 +774,7 @@ impl Table {
             rev: 0,
             board_rev: 0,
             game_id: 1,
+            next_game_id: 2,
             recent: VecDeque::new(),
             bumps: VecDeque::new(),
             stopped_by_person: None,
@@ -805,7 +807,8 @@ impl Table {
         self.session.play.active && self.tip_result().is_none()
     }
 
-    fn tip_result(&self) -> Option<ResultBody> {
+    /// The result of the game at the match tip, if it has ended.
+    pub fn tip_result(&self) -> Option<ResultBody> {
         self.tip_status.as_ref().and_then(|s| {
             s.outcome.map(|outcome| ResultBody {
                 outcome,
@@ -831,6 +834,29 @@ impl Table {
 
     pub fn instance(&self) -> &str {
         &self.instance
+    }
+
+    /// The next change lands on `rev + 1`.
+    pub fn set_rev(&mut self, rev: u64) {
+        self.rev = rev;
+    }
+
+    pub(crate) fn set_game_id(&mut self, game_id: u64) {
+        self.game_id = game_id;
+        self.next_game_id = self.next_game_id.max(game_id + 1);
+    }
+
+    /// The `game_id` the next new game takes.
+    pub(crate) fn next_game_id(&self) -> u64 {
+        self.next_game_id
+    }
+
+    pub(crate) fn set_next_game_id(&mut self, next: u64) {
+        self.next_game_id = next;
+    }
+
+    pub(crate) fn hint(&self) -> &Hint {
+        &self.hint
     }
 
     pub fn session(&self) -> &Session {
@@ -1606,7 +1632,8 @@ impl Table {
         self.session.game = game;
         self.session.play.active = false;
         self.session.play.tip = 0;
-        self.game_id += 1;
+        self.game_id = self.next_game_id;
+        self.next_game_id += 1;
 
         let g = &self.session.game;
         let result = json!({

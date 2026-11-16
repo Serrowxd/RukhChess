@@ -13,6 +13,8 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::hub::Hub;
 use crate::{start, Running};
 
+mod tabs;
+
 const WAIT: Duration = Duration::from_secs(10);
 
 /// A request in the guard test: method, path, extra headers, body.

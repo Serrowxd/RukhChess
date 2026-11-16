@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use rukh_core::Side;
+use rukh_core::{Side, TabId};
 use serde_json::json;
 use tokio::sync::watch;
 
@@ -34,8 +34,10 @@ struct Inner {
     ais: BTreeMap<String, Ai>,
     /// Every `by` handed out, with its MCP session. Never reused.
     sessions: BTreeMap<String, u64>,
-    /// White, then black.
+    /// White, then black, on `ai_tab`.
     holders: [Option<String>; 2],
+    /// The tab of the AI match; one at a time.
+    ai_tab: Option<TabId>,
     /// The AI seat the running match is waiting on.
     owed: Option<Side>,
     /// The last message without `idle_s`, to tell a real change from the clock moving.
@@ -173,6 +175,7 @@ impl Inner {
                     "name": shown,
                     "transport": "http",
                     "seat": self.seat_of(by).map(Side::name),
+                    "tab": self.seat_of(by).and(self.ai_tab),
                     "waiting": ai.waiting > 0,
                     "idle_s": now.saturating_duration_since(ai.last_seen).as_secs(),
                 })
@@ -186,8 +189,9 @@ impl Inner {
             .into_iter()
             .map(|(by, shown, ai)| (shown, self.seat_of(by).map(Side::name), ai.waiting > 0))
             .collect();
+        let tab = self.ai_tab.map(|t| t.to_string());
 
-        format!("{}|{ais:?}", self.views)
+        format!("{}|{tab:?}|{ais:?}", self.views)
     }
 
     fn message(&self, now: Instant) -> String {
@@ -218,6 +222,7 @@ impl Presence {
             ais: BTreeMap::new(),
             sessions: BTreeMap::new(),
             holders: [None, None],
+            ai_tab: None,
             owed: None,
             shape: String::new(),
             published_at: now,
@@ -297,11 +302,35 @@ impl Presence {
         self.publish(&mut inner, false);
     }
 
-    /// Takes `seat` over from any other client.
-    pub fn set_seat(&self, by: &str, name: &str, seat: Side) {
+    /// Takes `seat` on `tab` over from any other client; holders on another tab are dropped.
+    pub fn hold_seat(&self, by: &str, name: &str, seat: Side, tab: TabId, owed: Option<Side>) {
         let mut inner = self.lock();
         Presence::touch(&mut inner, by, name);
+
+        if inner.ai_tab != Some(tab) {
+            inner.holders = [None, None];
+            inner.ai_tab = Some(tab);
+        }
+
         inner.holders[slot(seat)] = Some(by.to_string());
+        inner.owed = owed;
+        self.publish(&mut inner, false);
+    }
+
+    pub fn ai_tab(&self) -> Option<TabId> {
+        self.lock().ai_tab
+    }
+
+    /// The AI match's tab was closed: nobody holds a seat any more.
+    pub fn forget_tab(&self, tab: TabId) {
+        let mut inner = self.lock();
+        if inner.ai_tab != Some(tab) {
+            return;
+        }
+
+        inner.holders = [None, None];
+        inner.ai_tab = None;
+        inner.owed = None;
         self.publish(&mut inner, false);
     }
 
@@ -336,7 +365,7 @@ impl Presence {
         by
     }
 
-    /// A seat that is no longer an AI seat of an active match is held by nobody.
+    /// From the AI match's table: a seat no longer an AI seat of an active match is held by nobody.
     pub fn reconcile(&self, active: bool, ai_seats: [bool; 2], owed: Option<Side>) {
         let mut inner = self.lock();
 
@@ -344,6 +373,10 @@ impl Presence {
             if !active || !is_ai {
                 *holder = None;
             }
+        }
+
+        if inner.holders.iter().all(Option::is_none) {
+            inner.ai_tab = None;
         }
 
         inner.owed = owed;

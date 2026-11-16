@@ -1,7 +1,7 @@
 //! MCP over streamable HTTP at `/mcp`: tools, prompts and server instructions.
 
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -18,11 +18,11 @@ use rmcp::{
     RoleServer, ServerHandler,
 };
 use rukh_core::session::{RULE_ANNOTATE, RULE_COACH, RULE_SILENT};
-use rukh_core::{Seat, Side, WaitEvent, WaitFor};
+use rukh_core::{Seat, Side, TabId, WaitEvent, WaitFor};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::hub::Hub;
+use crate::hub::{in_progress, only_ai_seat, Hub, Refused};
 use crate::presence::clean_name;
 
 pub type Service = StreamableHttpService<RukhMcp, LocalSessionManager>;
@@ -44,6 +44,24 @@ const PROGRESS_SEND_LIMIT: Duration = Duration::from_secs(2);
 /// Later versions have no session, so who a client is would be lost; see docs/program.md.
 const MAX_PROTOCOL: ProtocolVersion = ProtocolVersion::V_2025_11_25;
 
+const TAB_CLOSED: &str = "The person closed the board this game was on, so the game is over for \
+     you. Stop and tell them; nothing more happens until they press Start on a board.";
+
+const GAME_CLOSED: &str = "That game was closed.";
+
+/// Which board a session acts on; see docs/program.md.
+#[derive(Debug, Default)]
+struct Place {
+    /// The tab and seat a seated `wait` took; every call acts there while it lasts.
+    bound: Option<(TabId, Side)>,
+    /// The tab of the last result this session was given.
+    seen: Option<TabId>,
+    /// The tab of the newest binding, kept after it ends.
+    last_bound: Option<TabId>,
+    /// The person closed the bound tab, so no match starts on the shown board.
+    closed: bool,
+}
+
 /// One per MCP session, so what is kept here belongs to that client alone.
 #[derive(Clone)]
 pub struct RukhMcp {
@@ -57,6 +75,7 @@ pub struct RukhMcp {
     turn_seen: Arc<Mutex<Option<(u64, u32)>>>,
     /// The seat of this client's last `wait(for: my_turn)`.
     last_side: Arc<Mutex<Option<Side>>>,
+    place: Arc<Mutex<Place>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
@@ -511,9 +530,13 @@ impl RukhMcp {
             .clone()
     }
 
-    fn views_note(&self, views: u32) -> String {
+    fn views_note(&self, views: u32, tab: TabId) -> String {
         if views > 0 {
-            String::new()
+            if self.hub.selected() == tab {
+                String::new()
+            } else {
+                " The person is looking at another board.".to_string()
+            }
         } else if self.link.is_empty() {
             " No board is open; ask the person to open the Rukh board.".to_string()
         } else {
@@ -521,6 +544,98 @@ impl RukhMcp {
                 " No board is open; ask the person to open {} in a browser.",
                 self.link
             )
+        }
+    }
+
+    fn place(&self) -> MutexGuard<'_, Place> {
+        // A few ids; after a panic elsewhere they are still usable.
+        self.place
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn bound(&self) -> Option<(TabId, Side)> {
+        self.place().bound
+    }
+
+    fn bind(&self, tab: TabId, seat: Side) {
+        let mut place = self.place();
+        place.bound = Some((tab, seat));
+        place.last_bound = Some(tab);
+        place.closed = false;
+    }
+
+    fn unbind(&self) {
+        self.place().bound = None;
+    }
+
+    /// True while `side` is an AI seat of a match in progress on `tab`.
+    fn seat_lives(&self, tab: TabId, side: Side) -> bool {
+        self.hub
+            .read_on(tab, |t| {
+                in_progress(t) && t.match_state().seats.get(side) == Seat::Ai
+            })
+            .unwrap_or(false)
+    }
+
+    /// Ends the binding once its seat is no longer an AI seat of a match in progress.
+    fn end_dead_binding(&self) {
+        let Some((tab, side)) = self.bound() else {
+            return;
+        };
+
+        if !self.seat_lives(tab, side) {
+            self.unbind();
+        }
+    }
+
+    fn saw(&self, tab: TabId) {
+        self.place().seen = Some(tab);
+    }
+
+    /// The person closed the bound tab: unbound, and no match starts on the shown board.
+    fn mark_closed(&self) {
+        {
+            let mut place = self.place();
+            place.bound = None;
+            place.closed = true;
+        }
+        self.set_turn_seen(None);
+    }
+
+    /// The binding ends with `tab_closed`.
+    fn tab_closed(&self) -> CallToolResult {
+        self.mark_closed();
+
+        let value = json!({"event": "game_over", "stopped": "tab_closed"});
+        let line = wait_line(&value, None);
+        tool_ok(value, line)
+    }
+
+    /// The tab a call acts on: the bound one, else the one last read, else the shown one.
+    fn call_tab(&self) -> Result<TabId, CallToolResult> {
+        let (bound, seen) = {
+            let place = self.place();
+            (place.bound, place.seen)
+        };
+
+        if let Some((tab, _)) = bound {
+            if self.hub.has_tab(tab) {
+                return Ok(tab);
+            }
+
+            self.mark_closed();
+            return Err(tool_error(GAME_CLOSED));
+        }
+
+        match seen {
+            Some(tab) if self.hub.has_tab(tab) => Ok(tab),
+            Some(_) => Err(tool_error(GAME_CLOSED)),
+            None => {
+                let tab = self.hub.selected();
+                self.saw(tab);
+                Ok(tab)
+            }
         }
     }
 
@@ -556,87 +671,261 @@ impl RukhMcp {
     }
 
     /// The seat this client waited on before the person moved it to the other colour.
-    fn moved_from_seat(&self) -> Option<Side> {
+    fn moved_from_seat(&self, tab: TabId) -> Option<Side> {
         let last = *self
             .last_side
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let moved_to = self.hub.read(|t| t.seat_moved_to());
+        let moved_to = self.hub.read_on(tab, |t| t.seat_moved_to()).flatten();
         last.filter(|side| moved_to == Some(side.other()))
     }
 
-    fn held_seat(&self, by: &str) -> Option<Side> {
-        let remembered = self.hub.presence().seat_of(by);
-
-        self.hub.read(|t| {
-            let m = t.match_state();
-            remembered.filter(|side| m.active && m.seats.get(*side) == Seat::Ai)
-        })
-    }
-
     /// With no seat passed: the one held before, or the only AI seat if nobody else holds it.
-    fn implied_seat(&self, by: &str) -> Option<Side> {
-        self.held_seat(by).or_else(|| {
-            let only = self.hub.read(|t| {
-                let m = t.match_state();
+    fn implied_seat(&self, by: &str, tab: TabId) -> Option<Side> {
+        self.hub.held_seat(tab, by).or_else(|| {
+            let only = self.hub.read_on(tab, only_ai_seat).flatten()?;
 
-                if !m.active {
-                    return None;
-                }
-
-                match (m.seats.white == Seat::Ai, m.seats.black == Seat::Ai) {
-                    (true, false) => Some(Side::White),
-                    (false, true) => Some(Side::Black),
-                    _ => None,
-                }
-            })?;
-
-            let other = self.hub.presence().holder_of(only);
+            let other = self.hub.holder_on(tab, only);
             other.is_none_or(|(holder, _)| holder == by).then_some(only)
         })
     }
 
-    fn wait_result(
+    /// Where a `wait` with `seat` plays, by the seat order in docs/program.md.
+    fn seat_tab(&self, by: &str, seat: Side) -> Result<Seating, CallToolResult> {
+        let (bound, last_bound, closed) = {
+            let place = self.place();
+            (place.bound, place.last_bound, place.closed)
+        };
+        let selected = self.hub.selected();
+
+        if let Some((tab, side)) = bound {
+            if !self.hub.has_tab(tab) {
+                return Err(self.tab_closed());
+            }
+
+            if selected == tab {
+                return Ok(Seating::play(tab));
+            }
+
+            // A hidden tab: its game goes on, and nothing is started there.
+            if side == seat {
+                return Ok(Seating {
+                    tab,
+                    claim: false,
+                    hold: true,
+                });
+            }
+
+            if self.seat_lives(tab, side) {
+                let name = self.hub.tab_name(tab).unwrap_or_default();
+                return Err(tool_error(format!(
+                    "You are playing on \u{ab}{name}\u{bb}; finish it or ask the person to stop it."
+                )));
+            }
+
+            self.unbind();
+        }
+
+        if self.hub.seat_open(selected, seat, by) {
+            return Ok(Seating::play(selected));
+        }
+
+        if let [(tab, _)] = self.hub.open_seats(Some(seat), by)[..] {
+            return Ok(Seating::play(tab));
+        }
+
+        if closed {
+            return Err(self.tab_closed());
+        }
+
+        if self.hub.is_free_board(selected) {
+            return Ok(Seating::play(selected));
+        }
+
+        match last_bound {
+            Some(tab) if tab == selected => Ok(Seating::play(tab)),
+            Some(tab) if self.hub.has_tab(tab) => Ok(Seating {
+                tab,
+                claim: false,
+                hold: false,
+            }),
+            Some(_) => Err(tool_error(GAME_CLOSED)),
+            None => Ok(Seating::play(selected)),
+        }
+    }
+
+    /// Where a `wait` with no seat plays: the bound tab, else the one unheld AI seat.
+    fn implied_tab(&self, by: &str) -> Result<(TabId, Option<Side>), CallToolResult> {
+        if let Some((tab, _)) = self.bound() {
+            if !self.hub.has_tab(tab) {
+                return Err(self.tab_closed());
+            }
+
+            let side = self
+                .moved_from_seat(tab)
+                .or_else(|| self.implied_seat(by, tab));
+            if side.is_some() {
+                return Ok((tab, side));
+            }
+
+            self.unbind();
+        }
+
+        let selected = self.hub.selected();
+        let found = match self
+            .moved_from_seat(selected)
+            .or_else(|| self.implied_seat(by, selected))
+        {
+            Some(side) => Some((selected, side)),
+            None => match self.hub.open_seats(None, by)[..] {
+                [(tab, side)] => Some((tab, side)),
+                _ => None,
+            },
+        };
+
+        let Some((tab, side)) = found else {
+            return Ok((selected, None));
+        };
+
+        if let Some(name) = self.hub.ai_playing_elsewhere(tab) {
+            return Err(tool_error(already_playing(&name)));
+        }
+
+        self.bind(tab, side);
+        Ok((tab, Some(side)))
+    }
+
+    /// Where a `wait for=any_change` watches, and whether it follows the selection.
+    fn watch_tab(
         &self,
-        event: &WaitEvent,
-        side: Option<Side>,
-        game_id: u64,
-        views: u32,
-        prefix: &str,
-    ) -> CallToolResult {
-        let value = match serde_json::to_value(event) {
+        by: &str,
+        since: Option<u64>,
+    ) -> Result<(TabId, WaitFor, bool), CallToolResult> {
+        let (bound, seen) = {
+            let place = self.place();
+            (place.bound, place.seen)
+        };
+        let selected = self.hub.selected();
+
+        let (tab, follow) = match bound {
+            Some((tab, _)) if self.hub.has_tab(tab) => (tab, false),
+            Some(_) => return Err(self.tab_closed()),
+            None => match seen {
+                Some(tab) if tab != selected => return Err(self.switched(by, "")),
+                _ => (selected, true),
+            },
+        };
+
+        Ok((tab, WaitFor::AnyChange { since }, follow))
+    }
+
+    /// A changed event with the newly selected tab's position.
+    fn switched(&self, by: &str, prefix: &str) -> CallToolResult {
+        let views = self.hub.presence().views();
+
+        let (tab, value, game_id) = self.hub.read_desk(|desk| {
+            let tab = desk.selected();
+            let seat = self.hub.held_seat_in(desk, tab, by);
+
+            let event = WaitEvent {
+                event: "changed",
+                position: Some(desk.shown().position(seat, views)),
+                since_last: Some(Vec::new()),
+                since_last_truncated: None,
+                result: None,
+                stopped: None,
+                seat: None,
+                board_rev: None,
+            };
+            (tab, serde_json::to_value(event), desk.shown().game_id())
+        });
+
+        let mut value = match value {
             Ok(value) => value,
             Err(e) => return tool_error(format!("The game could not be encoded: {e}")),
         };
 
-        if event.position.is_some() {
-            self.position_seen(game_id, &value);
-        }
-
-        if let (Some(seat), Some((by, name))) = (event.seat, self.me.get()) {
-            self.hub.presence().set_seat(by, name, seat);
-            self.set_last_side(Some(seat));
-        }
+        self.position_seen(game_id, &value);
+        self.saw(tab);
+        value["tab"] = json!(tab);
 
         let line = format!(
-            "{prefix}{}{}",
-            wait_line(&value, side),
-            self.views_note(views)
+            "{prefix}The person switched to another board. Node {}, board_rev {}. Style: {}.{}",
+            value["node"],
+            value["board_rev"],
+            str_at(&value, &["style", "name"]),
+            self.views_note(views, tab)
         );
 
         tool_ok(value, line)
     }
 
-    fn apply(&self, by: &str, intent: Value) -> Result<Value, rukh_core::Error> {
+    fn wait_result(&self, event: &WaitEvent, end: WaitEnd, prefix: &str) -> CallToolResult {
+        let mut value = match serde_json::to_value(event) {
+            Ok(value) => value,
+            Err(e) => return tool_error(format!("The game could not be encoded: {e}")),
+        };
+
+        self.saw(end.tab);
+        if event.position.is_some() {
+            self.position_seen(end.game_id, &value);
+            value["tab"] = json!(end.tab);
+        }
+
+        if let (Some(seat), Some((by, name))) = (event.seat, self.me.get()) {
+            let held = self.hub.hold_seat(end.tab, by, name, seat).is_ok();
+            self.set_last_side(Some(seat));
+
+            if held && end.seated {
+                self.bind(end.tab, seat);
+            }
+        }
+
+        // The wait that reports the end of a game is the last one that uses the binding.
+        if end.seated && event.event == "game_over" {
+            self.unbind();
+        }
+
+        let line = format!(
+            "{prefix}{}{}",
+            wait_line(&value, end.side),
+            self.views_note(end.views, end.tab)
+        );
+
+        tool_ok(value, line)
+    }
+
+    fn apply(&self, by: &str, tab: TabId, intent: Value) -> Result<Value, rukh_core::Error> {
         self.hub
-            .apply(by, &intent.to_string(), None)
+            .apply_on(tab, by, &intent.to_string(), None)
             .map(|applied| applied.result)
     }
 
-    /// Returns the prose to put before the wait result.
-    fn claim(&self, by: &str, seat: Side) -> Result<String, rukh_core::Error> {
-        let result = self.apply(by, json!({"op": "claim_seat", "seat": seat.name()}))?;
+    /// Returns the prose to put before the wait result, or the answer when nothing was claimed.
+    fn claim(
+        &self,
+        by: &str,
+        name: &str,
+        seat: Side,
+        tab: TabId,
+    ) -> Result<String, CallToolResult> {
+        let intent = json!({"op": "claim_seat", "seat": seat.name()}).to_string();
+
+        let result = match self.hub.apply_seated(tab, by, name, seat, &intent) {
+            Ok(applied) => applied.result,
+            Err(Refused::Elsewhere(other)) => return Err(tool_error(already_playing(&other))),
+            Err(Refused::Core(rukh_core::Error::UnknownTab(_)))
+                if self.bound().is_some_and(|(bound, _)| bound == tab) =>
+            {
+                return Err(self.tab_closed());
+            }
+            Err(Refused::Core(e)) => {
+                self.end_dead_binding();
+                return Err(tool_error(core_refusal(&e)));
+            }
+        };
+
         let started = result["started"].as_bool().unwrap_or(false);
         let claimed = result["claimed"].as_bool().unwrap_or(false);
 
@@ -651,6 +940,59 @@ impl RukhMcp {
         } else {
             String::new()
         })
+    }
+}
+
+/// Where a seated `wait` goes, and what it does there.
+struct Seating {
+    tab: TabId,
+    /// Send `claim_seat`, which may start a match.
+    claim: bool,
+    /// Count the seat as held while waiting on it.
+    hold: bool,
+}
+
+impl Seating {
+    fn play(tab: TabId) -> Seating {
+        Seating {
+            tab,
+            claim: true,
+            hold: true,
+        }
+    }
+}
+
+/// What a finished `wait` needs to word its result.
+#[derive(Clone, Copy)]
+struct WaitEnd {
+    tab: TabId,
+    side: Option<Side>,
+    game_id: u64,
+    views: u32,
+    /// A `my_turn` wait, which can end or move the binding.
+    seated: bool,
+}
+
+/// What one look at the desk found.
+enum Look {
+    Seen {
+        event: Option<Box<WaitEvent>>,
+        board_rev: u64,
+        game_id: u64,
+    },
+    Switched,
+    Gone,
+}
+
+fn already_playing(name: &str) -> String {
+    format!("An AI is already playing on \u{ab}{name}\u{bb}.")
+}
+
+/// A refusal from the core in words; a tab that went away reads as a closed game.
+pub(crate) fn core_refusal(e: &rukh_core::Error) -> String {
+    match e {
+        rukh_core::Error::UnknownTab(_) => GAME_CLOSED.to_string(),
+        e => e.to_string(),
     }
 }
 
@@ -691,6 +1033,7 @@ fn wait_line(event: &Value, side: Option<Side>) -> String {
                 format!("If the person starts a new game or asks for another, {wait_again}.");
 
             match event["stopped"].as_str() {
+                Some("tab_closed") => TAB_CLOSED.to_string(),
                 Some("match_stop") => format!("The person stopped the match. {wait_for_start}"),
                 Some("new_game") => format!(
                     "The person started a new game during the match, which ended it. \
@@ -766,6 +1109,7 @@ impl RukhMcp {
             me: Arc::new(OnceLock::new()),
             turn_seen: Arc::new(Mutex::new(None)),
             last_side: Arc::new(Mutex::new(None)),
+            place: Arc::new(Mutex::new(Place::default())),
         }
     }
 
@@ -781,11 +1125,20 @@ impl RukhMcp {
         let (by, name) = self.who(context.client_info());
         self.hub.presence().seen(&by, &name);
 
-        let seat = self.held_seat(&by);
+        let tab = if self.bound().is_some() {
+            match self.call_tab() {
+                Ok(tab) => tab,
+                Err(refused) => return Ok(refused),
+            }
+        } else {
+            self.hub.selected()
+        };
+
+        let seat = self.hub.held_seat(tab, &by);
         let views = self.hub.presence().views();
         let tree = args.detail == Some(DetailArg::Tree);
 
-        let (value, game_id) = self.hub.read(|t| {
+        let read = self.hub.read_on(tab, |t| {
             let value = if tree {
                 serde_json::to_value(t.tree(seat, views))
             } else {
@@ -794,12 +1147,18 @@ impl RukhMcp {
             (value, t.game_id())
         });
 
-        let value = match value {
+        let Some((value, game_id)) = read else {
+            return Ok(tool_error(GAME_CLOSED));
+        };
+
+        let mut value = match value {
             Ok(value) => value,
             Err(e) => return Ok(tool_error(format!("The game could not be encoded: {e}"))),
         };
 
+        self.saw(tab);
         self.position_seen(game_id, &value);
+        value["tab"] = json!(tab);
 
         let browsing = if value["tip"].is_u64() && value["live"] == false {
             format!(
@@ -817,7 +1176,7 @@ impl RukhMcp {
             value["node"],
             value["board_rev"],
             str_at(&value, &["style", "name"]),
-            self.views_note(views)
+            self.views_note(views, tab)
         );
 
         Ok(tool_ok(value, line))
@@ -842,22 +1201,39 @@ impl RukhMcp {
             .clamp(WAIT_MIN_S, WAIT_MAX_S);
 
         let mut prefix = String::new();
-        let what = match args.what.unwrap_or(WaitForArg::MyTurn) {
+        let (tab, what, follow) = match args.what.unwrap_or(WaitForArg::MyTurn) {
             // Never takes a seat: a coach must not become the person's opponent.
-            WaitForArg::AnyChange => WaitFor::AnyChange { since: args.since },
+            WaitForArg::AnyChange => match self.watch_tab(&by, args.since) {
+                Ok(watch) => watch,
+                Err(answer) => return Ok(answer),
+            },
             WaitForArg::MyTurn => {
-                let side = match args.seat.map(Side::from) {
+                let (tab, side, hold) = match args.seat.map(Side::from) {
                     Some(seat) => {
-                        match self.claim(&by, seat) {
-                            Ok(text) => prefix = text,
-                            Err(e) => return Ok(tool_error(e.to_string())),
+                        let seating = match self.seat_tab(&by, seat) {
+                            Ok(seating) => seating,
+                            Err(answer) => return Ok(answer),
+                        };
+
+                        if seating.claim {
+                            match self.claim(&by, &name, seat, seating.tab) {
+                                Ok(text) => prefix = text,
+                                Err(answer) => return Ok(answer),
+                            }
+
+                            self.bind(seating.tab, seat);
                         }
-                        seat
+
+                        // A claim holds its seat itself.
+                        (seating.tab, seat, seating.hold && !seating.claim)
                     }
-                    None => match self.moved_from_seat().or_else(|| self.implied_seat(&by)) {
-                        Some(side) => side,
-                        None => {
-                            let running = self.hub.read(|t| t.match_state().active);
+                    None => match self.implied_tab(&by) {
+                        Ok((tab, Some(side))) => (tab, side, true),
+                        Ok((tab, None)) => {
+                            let running = self
+                                .hub
+                                .read_on(tab, |t| t.match_state().active)
+                                .unwrap_or(false);
                             return Ok(tool_error(if running {
                                 "A match is running but you hold no seat in it, so there is no \
                                  turn to wait for. To play, call wait with seat=\"white\" or \
@@ -870,32 +1246,41 @@ impl RukhMcp {
                                  follow the board."
                             }));
                         }
+                        Err(answer) => return Ok(answer),
                     },
                 };
 
-                let seated = self.hub.read(|t| {
-                    let m = t.match_state();
-                    m.active && m.seats.get(side) == Seat::Ai
-                });
+                let seated = self
+                    .hub
+                    .read_on(tab, |t| {
+                        let m = t.match_state();
+                        m.active && m.seats.get(side) == Seat::Ai
+                    })
+                    .unwrap_or(false);
 
                 // Waiting on a seat is holding it.
-                if seated {
-                    presence.set_seat(&by, &name, side);
+                if seated && hold {
+                    if let Err(other) = self.hub.hold_seat(tab, &by, &name, side) {
+                        self.unbind();
+                        return Ok(tool_error(already_playing(&other)));
+                    }
                 }
 
                 self.set_last_side(Some(side));
-                WaitFor::MyTurn(side)
+                (tab, WaitFor::MyTurn(side), false)
             }
         };
 
         let side = match what {
             WaitFor::MyTurn(side) => Some(side),
-            WaitFor::AnyChange { .. } => self.held_seat(&by),
+            WaitFor::AnyChange { .. } => self.hub.held_seat(tab, &by),
         };
+        let seated = matches!(what, WaitFor::MyTurn(_));
+        self.saw(tab);
 
         // Subscribed before the first look, so a change in between still wakes this call.
         let mut frames = self.hub.subscribe();
-        let start_rev = self.hub.read(|t| t.rev());
+        let start_rev = self.hub.read_desk(|d| d.rev());
         let _waiting = presence.wait_started(&by, &name);
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
@@ -907,20 +1292,58 @@ impl RukhMcp {
         // The event if the wait should end, and the counters from the same lock.
         let look = || {
             let views = presence.views();
-            let (event, board_rev, game_id) = self.hub.read(|t| {
-                (
-                    t.wait_event_seated(&by, what, start_rev, views, side),
-                    t.board_rev(),
-                    t.game_id(),
-                )
+            let seen = self.hub.read_desk(|desk| {
+                let Some(t) = desk.table(tab) else {
+                    return Look::Gone;
+                };
+
+                if follow && desk.selected() != tab {
+                    return Look::Switched;
+                }
+
+                Look::Seen {
+                    event: t
+                        .wait_event_seated(&by, what, start_rev, views, side)
+                        .map(Box::new),
+                    board_rev: t.board_rev(),
+                    game_id: t.game_id(),
+                }
             });
-            (event, board_rev, game_id, views)
+            (seen, views)
+        };
+
+        // Ends the wait when the look says so; the timeout's board_rev comes with it.
+        let answer = |seen: Look, views: u32| -> Result<CallToolResult, u64> {
+            match seen {
+                Look::Gone if follow => Ok(self.switched(&by, &prefix)),
+                Look::Gone => Ok(self.tab_closed()),
+                Look::Switched => Ok(self.switched(&by, &prefix)),
+                Look::Seen {
+                    event: Some(event),
+                    game_id,
+                    ..
+                } => {
+                    let end = WaitEnd {
+                        tab,
+                        side,
+                        game_id,
+                        views,
+                        seated,
+                    };
+                    Ok(self.wait_result(&event, end, &prefix))
+                }
+                Look::Seen {
+                    event: None,
+                    board_rev,
+                    ..
+                } => Err(board_rev),
+            }
         };
 
         loop {
-            let (event, _, game_id, views) = look();
-            if let Some(event) = event {
-                return Ok(self.wait_result(&event, side, game_id, views, &prefix));
+            let (seen, views) = look();
+            if let Ok(result) = answer(seen, views) {
+                return Ok(result);
             }
 
             tokio::select! {
@@ -936,16 +1359,16 @@ impl RukhMcp {
                     return Ok(tool_error("The wait was cancelled."));
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    // The timeout's board_rev comes from the same last look.
-                    let (event, board_rev, game_id, views) = look();
-                    if let Some(event) = event {
-                        return Ok(self.wait_result(&event, side, game_id, views, &prefix));
-                    }
+                    let (seen, views) = look();
+                    let board_rev = match answer(seen, views) {
+                        Ok(result) => return Ok(result),
+                        Err(board_rev) => board_rev,
+                    };
 
                     let line = format!(
                         "{prefix}{}{}",
                         wait_line(&json!({}), side),
-                        self.views_note(views)
+                        self.views_note(views, tab)
                     );
 
                     return Ok(tool_timeout(board_rev, line));
@@ -984,16 +1407,25 @@ impl RukhMcp {
         let presence = self.hub.presence();
         presence.seen(&by, &name);
 
+        let tab = match self.call_tab() {
+            Ok(tab) => tab,
+            Err(refused) => return Ok(refused),
+        };
+
         // In a match, an AI seat held by another connected client is not this client's to move.
-        let (owed, game_id) = self.hub.read(|t| {
+        let read = self.hub.read_on(tab, |t| {
             let m = t.match_state();
             let side = t.session().turn_at_tip();
             let owed = (m.active && m.seats.get(side) == Seat::Ai).then_some(side);
             (owed, t.game_id())
         });
 
+        let Some((owed, game_id)) = read else {
+            return Ok(tool_error(GAME_CLOSED));
+        };
+
         if let Some(side) = owed {
-            if let Some((holder, shown)) = presence.holder_of(side) {
+            if let Some((holder, shown)) = self.hub.holder_on(tab, side) {
                 if holder != by {
                     self.set_turn_seen(None);
                     return Ok(tool_error(format!(
@@ -1035,33 +1467,27 @@ impl RukhMcp {
             intent.insert("highlights".into(), Value::Array(highlights));
         }
 
-        let applied = self.apply(&by, Value::Object(intent));
+        // Moving for an AI seat of the match takes that seat.
+        let intent = Value::Object(intent).to_string();
+        let applied = match owed {
+            Some(side) => self.hub.apply_seated(tab, &by, &name, side, &intent),
+            None => self
+                .hub
+                .apply_on(tab, &by, &intent, None)
+                .map_err(Refused::Core),
+        };
         self.set_turn_seen(None);
 
         let mut result = match applied {
-            Ok(result) => result,
-            Err(e) => return Ok(tool_error(e.to_string())),
+            Ok(applied) => applied.result,
+            Err(Refused::Elsewhere(other)) => return Ok(tool_error(already_playing(&other))),
+            Err(Refused::Core(e)) => return Ok(tool_error(core_refusal(&e))),
         };
 
         let views = presence.views();
         result["views"] = json!(views);
 
-        // Remember the seat this client moved for, when it is an AI seat of the running match.
         let turn = str_at(&result, &["turn"]);
-        let mover = if turn == "white" {
-            Side::Black
-        } else {
-            Side::White
-        };
-
-        let holds = self.hub.read(|t| {
-            let m = t.match_state();
-            m.active && m.seats.get(mover) == Seat::Ai
-        });
-
-        if holds {
-            presence.set_seat(&by, &name, mover);
-        }
 
         let mut line = format!(
             "Played {} ({}).",
@@ -1081,7 +1507,7 @@ impl RukhMcp {
         }
 
         line.push_str(&rejected_note(&result));
-        line.push_str(&self.views_note(views));
+        line.push_str(&self.views_note(views, tab));
 
         Ok(tool_ok(result, line))
     }
@@ -1098,6 +1524,11 @@ impl RukhMcp {
         let (by, name) = self.who(context.client_info());
         let presence = self.hub.presence();
         presence.seen(&by, &name);
+
+        let tab = match self.call_tab() {
+            Ok(tab) => tab,
+            Err(refused) => return Ok(refused),
+        };
 
         let mut intent = Map::new();
         intent.insert("op".into(), json!("annotate"));
@@ -1124,9 +1555,9 @@ impl RukhMcp {
         };
         intent.insert("mode".into(), json!(mode));
 
-        let mut result = match self.apply(&by, Value::Object(intent)) {
+        let mut result = match self.apply(&by, tab, Value::Object(intent)) {
             Ok(result) => result,
-            Err(e) => return Ok(tool_error(e.to_string())),
+            Err(e) => return Ok(tool_error(core_refusal(&e))),
         };
 
         let views = presence.views();
@@ -1159,7 +1590,7 @@ impl RukhMcp {
 
         let mut line = format!("Annotated node {} ({mode}): {what}.", result["node"]);
         line.push_str(&rejected_note(&result));
-        line.push_str(&self.views_note(views));
+        line.push_str(&self.views_note(views, tab));
 
         Ok(tool_ok(result, line))
     }
