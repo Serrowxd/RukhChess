@@ -16,7 +16,7 @@ use tokio::sync::watch;
 use crate::hub::Hub;
 
 /// Protocol version shared by `/api/hello` and the WebSocket hello.
-pub const PROTO: u32 = 1;
+pub const PROTO: u32 = 2;
 
 pub struct AppState {
     pub hub: Arc<Hub>,

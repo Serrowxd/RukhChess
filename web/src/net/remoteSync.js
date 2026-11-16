@@ -1,5 +1,8 @@
 /** Protocol version this page speaks. */
-export const PROTO = 1;
+export const PROTO = 2;
+
+/** Shown when the program refuses a new board at the limit. */
+export const TAB_LIMIT_TEXT = 'Close a board first.';
 
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const PROBE_TIMEOUT_MS = 1500;
@@ -248,6 +251,30 @@ export function readFrame(frame) {
   };
 }
 
+const TAB_KINDS = new Set(['free', 'game', 'reps']);
+const TAB_MARKS = new Set(['your_move', 'waiting', 'paused', 'over']);
+
+/** The frame's selected tab and its tab list. */
+export function readTabs(frame) {
+  const f = isObject(frame) ? frame : {};
+
+  const tabs = (Array.isArray(f.tabs) ? f.tabs : [])
+    .filter(t => isObject(t) && typeof t.id === 'string' && t.id)
+    .map(t => ({
+      id: t.id,
+      name: typeof t.name === 'string' ? t.name : t.id,
+      kind: TAB_KINDS.has(t.kind) ? t.kind : 'free',
+      mark: TAB_MARKS.has(t.mark) ? t.mark : null,
+    }));
+
+  return { tab: typeof f.tab === 'string' && f.tab ? f.tab : null, tabs };
+}
+
+/** True when the frame is for another tab than the one the page shows. */
+export function isTabSwitch(shownTab, frame) {
+  return shownTab !== null && readTabs(frame).tab !== shownTab;
+}
+
 export function readPresence(msg) {
   const m = isObject(msg) ? msg : {};
 
@@ -257,6 +284,7 @@ export function readPresence(msg) {
     seat: SIDES.includes(a.seat) ? a.seat : null,
     waiting: a.waiting === true,
     idle_s: Number.isFinite(a.idle_s) ? a.idle_s : 0,
+    ...(typeof a.tab === 'string' && a.tab ? { tab: a.tab } : {}),
   }));
 
   return { views: Number.isInteger(m.views) ? m.views : 0, ais };
@@ -328,9 +356,13 @@ export function choiceFromSeats(seats, fallback = {}) {
 }
 
 /** The AI chip's line: { text, state: 'none' | 'connected' | 'waiting' | 'to_move' }. */
-export function aiChip(presence, match, snapshot) {
-  const ais = presence && Array.isArray(presence.ais) ? presence.ais : [];
-  if (!ais.length) return { text: 'No AI connected', state: 'none' };
+export function aiChip(presence, match, snapshot, tab = null) {
+  const all = presence && Array.isArray(presence.ais) ? presence.ais : [];
+  if (!all.length) return { text: 'No AI connected', state: 'none' };
+
+  // An AI seated on another board is only connected as far as this board is concerned.
+  const elsewhere = a => tab !== null && typeof a.tab === 'string' && a.tab !== tab;
+  const ais = all.map(a => (elsewhere(a) ? { ...a, seat: null, waiting: false } : a));
 
   const m = readMatch(match);
   const seated = ais.filter(a => a.seat);
@@ -517,7 +549,7 @@ export function startRemoteSync(deps) {
   wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
 
   const guard = createEchoGuard();
-  const pending = new Map(); // intent id -> ack timer
+  const pending = new Map(); // intent id -> { timer, game, tab }
   let nextId = 1;
   let sock = null;
   let stopped = false;
@@ -528,6 +560,10 @@ export function startRemoteSync(deps) {
   let shownFen = store.state.game.fen();
   let warnedBadFrame = false;
   let batchRefusal = null; // first refusal among the intents in flight
+  let shownTab = null; // the tab whose game the page shows
+  let shownFrame = null; // the newest frame for that tab
+  const tabMeta = new Map(); // tab id -> the page-only study fields
+  const leaving = new Set(); // called before the page leaves a tab
 
   const isOpen = () => sock && sock.readyState === 1;
   let presence = null;
@@ -544,6 +580,8 @@ export function startRemoteSync(deps) {
   }
 
   const latestGame = () => (latest && latest.state && latest.state.game) || null;
+  const shownGame = () => (shownFrame && shownFrame.state && shownFrame.state.game) || null;
+  const selectedTab = () => readTabs(latest).tab;
 
   /** Copies the frame's current-node annotations onto the page's current node. */
   function copyCurrentAnnotations(snapshot) {
@@ -564,15 +602,68 @@ export function startRemoteSync(deps) {
     return true;
   }
 
+  function warnBadFrame(e) {
+    if (warnedBadFrame) return;
+
+    warnedBadFrame = true;
+    console.warn('[rukh] could not show the program\'s game:', e && e.message);
+
+    // A board left following nothing must not look connected.
+    actions.toast('This board cannot read the game the Rukh program sent. Reload the page; if that does not help, rebuild the board or update Rukh.', 'error');
+  }
+
+  /** True while a game intent made for `tab` waits for its ack. */
+  function pendingFor(tab) {
+    for (const p of pending.values()) if (p.game && p.tab === tab) return true;
+    return false;
+  }
+
+  /** Load another tab's game whole, once the old tab's unsaved edits are sent. */
+  function switchTo(tab) {
+    for (const fn of [...leaving]) {
+      try {
+        fn();
+      } catch (e) {
+        console.warn('[rukh] a listener failed:', e && e.message);
+      }
+    }
+
+    const st = store.state;
+    queuedGoto = null;
+
+    tabMeta.set(shownTab, { title: st.study.title, created: st.study.created, notes: st.study.notes });
+    shownTab = tab;
+    shownFrame = latest;
+
+    const open = new Set(readTabs(latest).tabs.map(t => t.id));
+    for (const id of [...tabMeta.keys()]) if (!open.has(id)) tabMeta.delete(id);
+
+    try {
+      const study = snapshotToStudy(latestGame(), { ...(tabMeta.get(tab) || {}), orientation: st.orientation });
+      guard.run(() => actions.loadStudy(study));
+    } catch (e) {
+      warnBadFrame(e);
+    }
+  }
+
   /** Bring the page to the latest frame, in the gentlest step that gets there. Idempotent. */
   function applyLatest() {
     if (stopped || !latest) return;
 
-    // Our own intents in flight: their frames would briefly undo the page. The last ack catches up.
-    if (pending.size) return;
+    const frameTab = readTabs(latest).tab;
+    if (shownTab === null) shownTab = frameTab;
+    if (frameTab === shownTab) shownFrame = latest;
 
-    // Never pull someone out of setup mode.
+    // Never pull someone out of setup mode; its commit goes to the tab it was started on.
     if (store.state.mode !== 'play') return;
+
+    if (isTabSwitch(shownTab, latest)) {
+      switchTo(frameTab);
+      return;
+    }
+
+    // Our own intents in flight: their frames would briefly undo the page. The last ack catches up.
+    if (pendingFor(shownTab)) return;
 
     const snapshot = latest.state && latest.state.game;
 
@@ -606,21 +697,15 @@ export function startRemoteSync(deps) {
 
       guard.run(() => actions.loadStudy(study));
     } catch (e) {
-      if (!warnedBadFrame) {
-        warnedBadFrame = true;
-        console.warn('[rukh] could not show the program\'s game:', e && e.message);
-
-        // A board left following nothing must not look connected.
-        actions.toast('This board cannot read the game the Rukh program sent. Reload the page; if that does not help, rebuild the board or update Rukh.', 'error');
-      }
+      warnBadFrame(e);
     }
   }
 
   function settle(id) {
-    const timer = pending.get(id);
-    if (timer === undefined) return;
+    const entry = pending.get(id);
+    if (entry === undefined) return;
 
-    clearT(timer);
+    clearT(entry.timer);
     pending.delete(id);
   }
 
@@ -631,9 +716,9 @@ export function startRemoteSync(deps) {
 
   const NOT_SHARED = 'Not connected to the Rukh program: this change was not shared and will be replaced when it reconnects';
 
-  function showsLatest() {
+  function showsShownFrame() {
     try {
-      return !!latest && gameSignature(store.state.game) === snapshotSignature(latest.state && latest.state.game);
+      return !!shownFrame && gameSignature(store.state.game) === snapshotSignature(shownGame());
     } catch (_) {
       return false;
     }
@@ -644,8 +729,12 @@ export function startRemoteSync(deps) {
     const refusal = batchRefusal;
     batchRefusal = null;
 
-    // A "stale" refusal is noise when the page already holds what the program holds.
-    if (refusal && !(refusal.code === 'stale' && showsLatest())) {
+    // A "stale" refusal is noise when the page already holds what the program holds for that tab.
+    const noise = refusal && refusal.code === 'stale' && refusal.tab === shownTab && showsShownFrame();
+
+    if (refusal && refusal.code === 'tab_limit') {
+      actions.toast(TAB_LIMIT_TEXT, 'error');
+    } else if (refusal && !noise) {
       actions.toast(`The Rukh program did not take that: ${refusal.message}`, 'error');
     }
 
@@ -656,7 +745,7 @@ export function startRemoteSync(deps) {
   }
 
   /** False when the intent could not be sent. */
-  function send(intent) {
+  function post(intent, entry) {
     if (!isOpen()) return false;
 
     const id = nextId++;
@@ -672,18 +761,26 @@ export function startRemoteSync(deps) {
       if (!pending.size) batchDone();
     }, ackTimeoutMs);
 
-    pending.set(id, timer);
+    pending.set(id, { timer, ...entry });
     return true;
   }
 
+  /** A game intent, stamped with the tab it was made for. */
+  const sendGame = (intent, tab) => post(tab === null ? intent : { ...intent, tab }, { game: true, tab });
+
+  /** A tab intent, which names its own tab. */
+  const sendTab = intent => post(intent, { game: false, tab: null });
+
   function onAck(msg) {
-    if (!pending.has(msg.id)) return;
+    const entry = pending.get(msg.id);
+    if (!entry) return;
 
     settle(msg.id);
 
     if (!msg.ok && !batchRefusal) {
       const error = isObject(msg.error) ? msg.error : {};
-      batchRefusal = { code: error.code, message: typeof error.message === 'string' && error.message ? error.message : 'refused' };
+      const message = typeof error.message === 'string' && error.message ? error.message : 'refused';
+      batchRefusal = { code: error.code, message, tab: entry.game ? entry.tab : null };
     }
 
     // Accepted with parts left out: say why, or the edit just disappears on the next frame.
@@ -691,7 +788,7 @@ export function startRemoteSync(deps) {
 
     if (rejected.length && !batchRefusal) {
       const first = isObject(rejected[0]) && typeof rejected[0].reason === 'string' ? rejected[0].reason : 'not accepted';
-      batchRefusal = { code: 'rejected', message: rejected.length > 1 ? `${first} (and ${rejected.length - 1} more)` : first };
+      batchRefusal = { code: 'rejected', message: rejected.length > 1 ? `${first} (and ${rejected.length - 1} more)` : first, tab: entry.tab };
     }
 
     // Ok or not, the program's latest frame is the truth.
@@ -744,6 +841,7 @@ export function startRemoteSync(deps) {
     if (stopped) return;
 
     const echo = guard.active;
+    const tab = shownTab;
 
     // Node ids are the program's: the page cursor is looked up in the latest frame, FEN-checked.
     const cursor = !echo && (reason === 'move' || reason === 'goto') ? game.cursor() : null;
@@ -756,10 +854,10 @@ export function startRemoteSync(deps) {
       move: reason === 'move' ? { san: game.current.san, uci: game.current.uci } : null,
       startFen: game.startFen,
       mainline: reason === 'load' ? mainlineMoves(game) : null,
-      fromNode: reason === 'move' && cursor ? nodeIdAt(latestGame(), cursor.slice(0, -1), fromFen) : null,
-      toNode: cursor ? nodeIdAt(latestGame(), cursor, game.fen()) : null,
+      fromNode: reason === 'move' && cursor ? nodeIdAt(shownGame(), cursor.slice(0, -1), fromFen) : null,
+      toNode: cursor ? nodeIdAt(shownGame(), cursor, game.fen()) : null,
       tip: (() => {
-        const m = readMatch(latest && latest.state && latest.state.match);
+        const m = readMatch(shownFrame && shownFrame.state && shownFrame.state.match);
         return m.active ? m.tip : null;
       })(),
     });
@@ -768,12 +866,12 @@ export function startRemoteSync(deps) {
 
     if (reason === 'goto') {
       // Navigation made in one go is sent once, as the node the page ends on.
-      queueGoto(intents[0].node);
+      queueGoto(intents[0].node, tab);
       return;
     }
 
     if (reason === 'move' && intents[0].op === 'goto') {
-      queuedGoto = intents[0].node;
+      queuedGoto = { node: intents[0].node, tab };
       flushGoto(true);
       return;
     }
@@ -786,7 +884,7 @@ export function startRemoteSync(deps) {
     }
 
     for (const intent of intents) {
-      if (!send(intent)) {
+      if (!sendGame(intent, tab)) {
         actions.toast(NOT_SHARED, 'error');
         if (!pending.size) applyLatest();
         return;
@@ -794,11 +892,11 @@ export function startRemoteSync(deps) {
     }
   }
 
-  let queuedGoto = null;
+  let queuedGoto = null; // { node, tab }
   let gotoScheduled = false;
 
-  function queueGoto(id) {
-    queuedGoto = id;
+  function queueGoto(node, tab) {
+    queuedGoto = { node, tab };
     if (gotoScheduled) return;
 
     gotoScheduled = true;
@@ -811,13 +909,16 @@ export function startRemoteSync(deps) {
 
   /** Send the queued goto; unless `always`, skip it when the program already shows that node. */
   function flushGoto(always) {
-    const id = queuedGoto;
+    const queued = queuedGoto;
     queuedGoto = null;
-    if (id === null || stopped) return true;
+    if (queued === null || stopped) return true;
 
-    const snapshot = latestGame();
-    if (!always && !pending.size && snapshot && snapshot.current === id) return true;
-    if (send({ op: 'goto', node: id })) return true;
+    // Navigation queued on a tab the page has left is dropped.
+    if (queued.tab !== shownTab) return true;
+
+    const snapshot = shownGame();
+    if (!always && !pendingFor(queued.tab) && snapshot && snapshot.current === queued.node) return true;
+    if (sendGame({ op: 'goto', node: queued.node }, queued.tab)) return true;
 
     actions.toast(NOT_SHARED, 'error');
     if (!pending.size) applyLatest();
@@ -829,25 +930,28 @@ export function startRemoteSync(deps) {
     if (stopped || guard.active || store.state.mode !== 'play') return;
 
     const game = store.state.game;
-    const snapshot = latestGame();
+    const snapshot = shownGame();
     const id = nodeIdAt(snapshot, game.cursor(), game.fen());
 
     // A node the program does not hold yet: the next frame decides.
     if (id === null) return;
     if (sameAnnotations(game.current, snapshotNode(snapshot, id))) return;
 
-    if (!send(annotateIntent(id, game.current))) {
+    if (!sendGame(annotateIntent(id, game.current), shownTab)) {
       actions.toast(NOT_SHARED, 'error');
       if (!pending.size) applyLatest();
     }
   }
 
-  function sendControl(intent) {
-    if (!stopped && send(intent)) return true;
-
+  function notConnected() {
     actions.toast('Not connected to the Rukh program', 'error');
     return false;
   }
+
+  /** A match control: it acts on the selected tab, whose match the play control shows. */
+  const sendControl = intent => (!stopped && sendGame(intent, selectedTab())) || notConnected();
+
+  const sendTabControl = intent => (!stopped && sendTab(intent)) || notConnected();
 
   function connect() {
     if (stopped) return;
@@ -921,6 +1025,7 @@ export function startRemoteSync(deps) {
     // One last call, so the play control can show it no longer reaches the program.
     notify();
     listeners.clear();
+    leaving.clear();
 
     const ws = sock;
     sock = null;
@@ -939,7 +1044,27 @@ export function startRemoteSync(deps) {
     status: () => ({ connected: isOpen(), instance: seen && seen.instance, rev: seen && seen.rev, pending: pending.size }),
     match: () => readMatch(latest && latest.state && latest.state.match),
     snapshot: latestGame,
+    state: () => (latest && isObject(latest.state) ? latest.state : null),
     presence: () => presence,
+
+    /** The selected tab and the list the strip draws. */
+    tabs: () => readTabs(latest),
+
+    /** The tab whose game the page shows; in setup, the tab setup began on. */
+    shownTab: () => shownTab,
+
+    selectTab: id => sendTabControl({ op: 'tab_select', tab: id }),
+    newTab: () => sendTabControl({ op: 'tab_new', name: null, copy_of: null }),
+    renameTab: (id, name) => sendTabControl({ op: 'tab_rename', tab: id, name: String(name) }),
+    closeTab: id => sendTabControl({ op: 'tab_close', tab: id }),
+
+    /** Calls fn just before the page leaves a tab, while the old tab is still shown. */
+    beforeSwitch(fn) {
+      if (typeof fn !== 'function') return () => {};
+
+      leaving.add(fn);
+      return () => leaving.delete(fn);
+    },
     connected: () => !!isOpen(),
 
     /** True once the page has stopped following the program for good. */

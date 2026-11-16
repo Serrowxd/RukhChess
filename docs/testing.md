@@ -23,6 +23,7 @@ The engine tests in `uci.test.mjs` start the real Stockfish build from `web/vend
 | File | Covers |
 | --- | --- |
 | `board-mapping.test.mjs` | Square to world coordinates and back (`three/board.js`). |
+| `board-tabs.test.mjs` | The board strip (`ui/boardTabs.js`) on a small stand-in DOM. |
 | `core-chess960.test.mjs` | Chess960 numbering and castling rights (`core/chess960.js`). |
 | `core-clock.test.mjs` | The chess clock arithmetic (`core/clock.js`). |
 | `core-game.test.mjs` | Rules, castling forms, the move tree, SAN and UCI (`core/game.js`). |
@@ -36,15 +37,16 @@ The engine tests in `uci.test.mjs` start the real Stockfish build from `web/vend
 | `piece-layer.test.mjs` | The piece layer across 2D and 3D (`three/pieceLayer.js`). |
 | `pieces-profiles.test.mjs` | Piece shapes, materials, glyphs and the piece layer's reconcile. |
 | `quality-levels.test.mjs` | The quality setting and what each level turns on. |
-| `remote-sync.test.mjs` | Remote mode: frames, signatures and the socket shell (`net/remoteSync.js`). |
+| `remote-sync.test.mjs` | Remote mode: frames, signatures and the socket shell (`net/remoteSync.js`). Its frames carry no `tab`, so it runs the one-unnamed-board path; the tab wire is proven by the tab tests. |
 | `remote-sync-step2.test.mjs` | Remote mode with node ids, matches, presence and the AI chip. |
+| `remote-sync-tabs.test.mjs` | Remote mode with board tabs: the tab on every intent, the switch path, setup. |
 | `render-on-demand.test.mjs` | Drawing only when something visible may have changed (`three/scene.js`). |
 | `stand-ins.test.mjs` | Low-detail stand-ins for modelled sets (`three/pieces.js`, `three/silhouette.js`). |
 | `stand-ins-view.test.mjs` | The view drawing shadows and the edge mask from the stand-ins. |
 | `uci.test.mjs` | UCI parsing and the Stockfish driver (`engine/`). |
 | `view-modes.test.mjs` | View mode, seat rotation and lighting (`three/scene.js`), and the 2D board look. |
 
-`fake-table.mjs` is a helper, not a test file.
+`fake-table.mjs` and `fake-program.mjs` are helpers, not test files. `node --test` still loads every `.mjs` under `test/`, so each counts as one passing test.
 
 ## Running three without a browser
 
@@ -73,6 +75,10 @@ The MCP bridge tests inject everything ambient: a stub `fetch` that records ever
 `fake-table.mjs` stands in for the Rukh program's table, so the page's remote mode can be tested without the program. It is written on the page's own `Game`. It speaks the step-2 frame and intent shapes: node ids, `from_node`, `goto`, `annotate` (replace only), `new_game`, `match_start`, `match_stop`, `set_seats`, `set_style`, `board_rev` and `recent`, and a computed `match.live` and `match.to_move`.
 
 It is not the program. It has no `claim_seat`, no `wait`, and no validation beyond what the page's tests need.
+
+`createFakeDesk()` in the same file holds several of those tables as tabs, one selected, with one `rev` for all of them. It speaks the tab wire: frames carry `tab` and `tabs`, a view's game intent must name its tab (missing is `bad_input`, an unknown one `unknown_tab`), an AI's intent lands on the selected tab, and it takes `tab_select`, `tab_new` (refused with `tab_limit` at 12), `tab_rename` (names cleaned as the program cleans them; the same name sends no frame) and `tab_close`. Marks are always `null`.
+
+`deskProgram(n)` in `fake-program.mjs` puts `n` pages on a desk over in-memory sockets. `pump()` applies every sent intent, frame first, then the ack, as the program does. The pages' timers wait until a test calls `runSoon()`, which runs the zero-delay ones.
 
 ## The interaction fakes
 

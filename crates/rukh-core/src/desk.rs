@@ -171,8 +171,7 @@ pub enum TabIntent {
 
 impl TabIntent {
     pub fn from_json(text: &str) -> Result<TabIntent, Error> {
-        serde_json::from_str(text)
-            .map_err(|e| Error::BadInput(format!("the intent could not be read: {e}")))
+        serde_json::from_str(text).map_err(Error::unreadable)
     }
 }
 
@@ -191,9 +190,9 @@ impl Routing {
         match serde_json::from_str::<Routing>(text) {
             Ok(routing) => Ok(Some(routing)),
 
-            Err(e) if serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object()) => Err(
-                Error::BadInput(format!("the intent could not be read: {e}")),
-            ),
+            Err(e) if serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_object()) => {
+                Err(Error::unreadable(e))
+            }
 
             Err(_) => Ok(None),
         }
@@ -216,7 +215,7 @@ struct FrameOut<'a> {
 pub fn clean_tab_name(name: &str) -> Option<String> {
     let visible: String = name
         .chars()
-        .filter(|c| !c.is_control() && !is_invisible_format(*c))
+        .filter(|c| c.is_whitespace() || (!c.is_control() && !is_invisible_format(*c)))
         .collect();
 
     let cleaned: String = visible

@@ -2005,6 +2005,130 @@ kbd {
   opacity: 0.5;
 }
 
+/* ---------- board tabs: one row of the topbar ---------- */
+
+/* contain keeps a long strip from widening the topbar; the list scrolls instead. */
+.topbar .b-tabs {
+  flex: 1 0 100%;
+  contain: inline-size;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding: 4px 2px 2px;
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+
+/* Only the tabs scroll; "+" stays in sight. Positioned so a tab's offsetLeft is measured from the list. */
+.b-tabs-list {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.b-tab {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+}
+
+.b-tab:hover {
+  background: var(--bg-2);
+}
+
+.b-tab.sel {
+  background: var(--gold-faint);
+  border-color: var(--gold-soft);
+}
+
+.b-tab-name {
+  min-height: 26px;
+  max-width: 24ch;
+  padding: 3px 2px 3px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  font: 500 12.5px var(--sans);
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.b-tab.sel .b-tab-name {
+  color: var(--ink);
+}
+
+/* Drawn inside, so the scrolling row cannot clip it. */
+.b-tab-name:focus-visible, .b-tab-menu:focus-visible {
+  outline-offset: -2px;
+}
+
+.b-tab-menu {
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--mute);
+  display: inline-flex;
+  align-items: center;
+}
+
+.b-tab-menu:hover {
+  color: var(--ink);
+}
+
+.b-tab-menu .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.b-tab-input {
+  width: 18ch;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  background: var(--bg);
+  font: 500 12.5px var(--sans);
+  color: var(--ink);
+  outline: none;
+}
+
+.b-new {
+  flex: none;
+  min-width: 28px;
+  justify-content: center;
+  font-size: 15px;
+}
+
+/* A zero basis gives the note only the room the tabs leave, so it gives way before they scroll. */
+.b-note {
+  flex: 1 1 0;
+  min-width: 0;
+  text-indent: 8px;
+  font: 11.5px var(--sans);
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.b-tabs.b-off {
+  opacity: 0.5;
+}
+
 /* ---------- lighting sliders ---------- */
 .field.sl {
   margin-bottom: 10px;

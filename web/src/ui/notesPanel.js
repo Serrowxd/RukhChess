@@ -16,6 +16,8 @@ export function createNotesPanel({ store, actions }) {
   let boundId = null;
   // { id, text } while a note save is queued; id is the node it was typed for.
   let pending = null;
+  // The board was left: typing is ignored until the fields show the new board.
+  let left = false;
 
   // Core has no node-addressed setNote, so goto, set, and go back.
   function writeNoteTo(nodeId, text) {
@@ -52,11 +54,19 @@ export function createNotesPanel({ store, actions }) {
     saveNote();
   };
 
-  title.addEventListener('input', e => saveTitle(e.target.value));
+  title.addEventListener('input', e => {
+    if (!left) saveTitle(e.target.value);
+  });
   title.addEventListener('blur', () => saveTitle.flush());
-  studyNotes.addEventListener('input', e => saveStudy(e.target.value));
+
+  studyNotes.addEventListener('input', e => {
+    if (!left) saveStudy(e.target.value);
+  });
   studyNotes.addEventListener('blur', () => saveStudy.flush());
-  note.addEventListener('input', e => queueNote(e.target.value));
+
+  note.addEventListener('input', e => {
+    if (!left) queueNote(e.target.value);
+  });
   note.addEventListener('blur', () => saveNote.flush());
 
   const nagButtons = new Map();
@@ -84,7 +94,7 @@ export function createNotesPanel({ store, actions }) {
   }
 
   const syncIfIdle = (inp, v) => {
-    if (document.activeElement !== inp) inp.value = v == null ? '' : String(v);
+    if (left || document.activeElement !== inp) inp.value = v == null ? '' : String(v);
   };
 
   function update() {
@@ -95,7 +105,7 @@ export function createNotesPanel({ store, actions }) {
     syncIfIdle(title, s.study && s.study.title);
     syncIfIdle(studyNotes, s.study && s.study.notes);
 
-    if (cur.id !== boundId) {
+    if (left || cur.id !== boundId) {
       // Deliver the typed note to the node it was typed for, then rebind.
       saveNote.flush();
       boundId = cur.id;
@@ -114,10 +124,20 @@ export function createNotesPanel({ store, actions }) {
     const setup = s.mode === 'setup';
     note.disabled = setup;
     nagPick.querySelectorAll('button').forEach(b => { b.disabled = setup; });
+
+    left = false;
+  }
+
+  /** Saves what was typed to the board being left, before another board is loaded. */
+  function leave() {
+    saveTitle.flush();
+    saveStudy.flush();
+    saveNote.flush();
+    left = true;
   }
 
   return {
-    el: root, update,
+    el: root, update, leave,
     dispose() {
       saveTitle.flush();
       saveStudy.flush();

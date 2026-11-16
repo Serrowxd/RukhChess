@@ -75,7 +75,22 @@ impl Error {
             | Error::BadInput(_) => "bad_input",
         }
     }
+
+    /// The refusal for text that is not a readable intent, with the parser's message cut short.
+    pub(crate) fn unreadable(e: impl fmt::Display) -> Error {
+        let why = e.to_string();
+        let mut cut: String = why.chars().take(MAX_UNREADABLE_CHARS).collect();
+
+        if cut.len() < why.len() {
+            cut.push_str("...");
+        }
+
+        Error::BadInput(format!("the intent could not be read: {cut}"))
+    }
 }
+
+/// Longest part of a parser's message that a refusal repeats.
+const MAX_UNREADABLE_CHARS: usize = 400;
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

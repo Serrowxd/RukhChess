@@ -1059,3 +1059,40 @@ fn with_one_tab_the_frame_is_the_table_frame_and_two_keys() {
         assert_eq!(without, b.frame_json, "{intent}");
     }
 }
+
+#[test]
+fn a_line_break_or_tab_in_a_name_reads_as_a_space() {
+    assert_eq!(
+        clean_tab_name("Italian,\n\tthe\u{0085}Bc5\rline").as_deref(),
+        Some("Italian, the Bc5 line")
+    );
+    assert_eq!(
+        clean_tab_name("Ruy\u{0007}\u{200B}Lopez").as_deref(),
+        Some("RuyLopez")
+    );
+}
+
+#[test]
+fn an_unreadable_intent_is_answered_with_a_short_message() {
+    let mut d = Desk::new("i1");
+    let long = "x".repeat(60_000);
+
+    for intent in [
+        json!({"op": format!("tab_{long}"), "tab": "t1"}),
+        json!({"op": format!("play_{long}"), "tab": "t1"}),
+        json!({"op": format!("tab_{long}")}),
+    ] {
+        let (code, message) = refuse(&mut d, VIEW, intent.clone());
+
+        assert_eq!(code, "bad_input");
+        assert!(
+            message.starts_with("the intent could not be read: "),
+            "{message}"
+        );
+        assert!(message.len() < 500, "{} characters", message.len());
+        assert!(message.ends_with("..."), "{message}");
+    }
+
+    let (_, short) = refuse(&mut d, VIEW, json!({"op": "tab_dance", "tab": "t1"}));
+    assert!(!short.ends_with("..."), "{short}");
+}

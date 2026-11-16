@@ -18,6 +18,7 @@ The panel, topbar, dialogs and keyboard bindings of the web board. Everything he
 - `dialogs.js` holds the modal dialogs (confirm, prompt, promotion picker) and the toasts.
 - `keys.js` holds the global keyboard bindings and the cheat-sheet rows.
 - `playPanel.js` is used only when the page is connected to the Rukh program.
+- `boardTabs.js` is the board strip, also used only when connected. In code and CSS the program's tabs are "boards" (`b-tabs`), so they never mix with the panel's own tabs.
 - `styles.css` holds all UI styles.
 
 Every panel factory returns an object with at least `el`, `update` and `dispose`.
@@ -91,6 +92,20 @@ When the page is connected to the Rukh program, `playPanel.js` adds an AI chip t
 During a match a seat change is sent at once; before Start it is only the choice that Start will send. The program's next frame confirms or undoes it.
 
 Start and Stop share one button. A click while the last control is still unanswered, or within 400 ms of the label changing, is ignored, so a double click cannot start and stop a match at once.
+
+## Board tabs
+
+`boardTabs.js` adds one row to the topbar: a tab per board, a "+" for a new board, and the line "Boards are not being saved." When the row is narrow the line gives way first, shrinking to an ellipsis and then to nothing; only after that do the tabs scroll sideways. "+" never shrinks, and the row never wraps. When the selected tab changes, or a name is being typed, the list scrolls just far enough to show that tab; other redraws keep the scroll where it was. `contain: inline-size` stops a long row from widening the topbar. The narrow layout is checked by eye, not by a test.
+
+- `stripModel(tabs, selected, state)` turns a frame into one entry per tab. Whether a tab has moves is known only for the selected tab, since the frame carries only its state.
+- `renderStrip(model, opts)` builds the DOM from that model. The controller redraws only when the model, the tab being renamed or the connection changes, and keeps focus on the same tab.
+- A click selects, and gives focus back so the arrow keys step through the moves. A double-click renames. Two quick clicks on "+" make one board. Each tab has a menu (the dots, a right-click, or Shift+F10) with Rename and Close.
+- Rename is in place: Enter commits, Escape cancels, leaving the field commits. The name shown is always the one in the next frame, which is the program's cleaned name.
+- Close asks first when the tab has moves. A tab that is not shown is always asked about, because its moves are not known. A closed board cannot be brought back, and the confirm says nothing that suggests otherwise.
+- Keys: the tabs are a `tablist` with one tab stop on the selected tab. Left, Right, Home and End move focus without selecting, Enter or Space selects, and F2 or Enter on the selected tab renames. Closing is only in the menu.
+- Marks are on each tab as `data-mark`; nothing draws them.
+- The strip needs the page's dialogs, so it can ask before a close; without them it is not mounted.
+- While a name is being typed the strip is not redrawn, so the field keeps its text; other windows' changes show once it is committed.
 
 ## Styles
 

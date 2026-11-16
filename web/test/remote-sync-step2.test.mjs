@@ -7,7 +7,7 @@ import {
 } from '../src/net/remoteSync.js';
 import { createStore } from '../src/core/store.js';
 import { Game } from '../src/core/game.js';
-import { createFakeTable } from './fake-table.mjs';
+import { createFakeTable, createFakeDesk } from './fake-table.mjs';
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
@@ -193,7 +193,8 @@ class FakeSocket {
 
 /** A program with N pages on it; pump() applies every sent intent, frame first, then the ack. */
 function program(n = 1) {
-  const table = createFakeTable({ instance: 'i1' });
+  const desk = createFakeDesk({ instance: 'i1' });
+  const table = desk.table('t1');
   const pages = [];
 
   for (let i = 0; i < n; i++) {
@@ -202,7 +203,7 @@ function program(n = 1) {
 
     const ws = FakeSocket.last;
     ws.onopen();
-    ws.receive({ t: 'hello', proto: 1, instance: 'i1', you: `view:${i + 1}` });
+    ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: `view:${i + 1}` });
 
     const events = [];
     st.on('game:change', p => events.push(p.reason));
@@ -214,7 +215,7 @@ function program(n = 1) {
   }
 
   const broadcast = () => {
-    const f = table.frame();
+    const f = desk.frame();
     for (const p of pages) p.ws.receive(f);
   };
 
@@ -233,20 +234,20 @@ function program(n = 1) {
           intents.push(msg);
 
           const { t: _t, id, ...intent } = msg;
-          const before = table.rev;
-          const res = table.apply(p.by, intent);
-          if (table.rev !== before) broadcast();
+          const before = desk.rev;
+          const res = desk.apply(p.by, intent);
+          if (desk.rev !== before) broadcast();
 
-          p.ws.receive(res.ok ? { t: 'ack', id, ok: true, rev: table.rev, result: res.result } : { t: 'ack', id, ok: false, error: res.error });
+          p.ws.receive(res.ok ? { t: 'ack', id, ok: true, rev: desk.rev, result: res.result } : { t: 'ack', id, ok: false, error: res.error });
         }
       }
     }
   };
 
   const ai = intent => {
-    const before = table.rev;
-    const res = table.apply('ai:claude-code', intent);
-    if (table.rev !== before) broadcast();
+    const before = desk.rev;
+    const res = desk.apply('ai:claude-code', intent);
+    if (desk.rev !== before) broadcast();
     return res;
   };
 

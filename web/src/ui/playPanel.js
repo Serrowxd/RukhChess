@@ -107,7 +107,8 @@ export function mountRemotePlay({ remote, ui }) {
     root.classList.toggle('rp-off', !reachable);
     root.inert = !reachable;
 
-    const c = aiChip(remote.presence(), match, remote.snapshot());
+    const board = typeof remote.tabs === 'function' ? remote.tabs().tab : null;
+    const c = aiChip(remote.presence(), match, remote.snapshot(), board);
     if (chipText.textContent !== c.text) chipText.textContent = c.text;
     chipDot.className = `dot ${c.state}`;
 

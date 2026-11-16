@@ -127,8 +127,13 @@ export function mountUi({ store, actions, engine, ai, view, layer, board }) {
     }
   }
 
+  /** Panels save what was typed for the board being left. */
+  function leaveBoard() {
+    for (const p of Object.values(panels)) if (typeof p.leave === 'function') p.leave();
+  }
+
   return {
-    dialogs, layout, topbar, panels, clock, refresh,
+    dialogs, layout, topbar, panels, clock, refresh, leaveBoard,
     getSetupBrush: () => panels.io.getBrush(),
     dispose() {
       if (raf) cancelAnimationFrame(raf);

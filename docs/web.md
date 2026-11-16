@@ -178,25 +178,33 @@ It is active only when `GET api/hello` answers as Rukh. On `file://` nothing is 
 Server to page:
 
 ```
-{"t":"hello","proto":1,"instance":"..","you":"view:3"}
-{"t":"state","instance":"..","rev":7,"hint":{..},"state":{"game_id","board_rev","recent",
+{"t":"hello","proto":2,"instance":"..","you":"view:3"}
+{"t":"state","instance":"..","rev":7,"hint":{..},"tab":"t2",
+  "tabs":[{"id":"t1","name":"Board 1","kind":"free","mark":null},{"id":"t2",..}],
+  "state":{"game_id","board_rev","recent",
   "game":<rukh_core::Snapshot>,"study","match":{active,seats,tip,live,to_move,style},"clock"}}
 {"t":"ack","id":4,"ok":true,"rev":7} | {"t":"ack","id":4,"ok":false,"error":{"code","message"}}
 {"t":"presence","views":2,"ais":[{"name","transport","seat","waiting","idle_s"}]}
 ```
 
+`tab` is the selected tab and `state` is that tab's state. Every window shows the selected tab.
+
 Page to server:
 
 ```
-{"t":"intent","id":4,"op":"play","move":"Nf3","from_node":11,"from_fen":".."}
-{"t":"intent","id":5,"op":"goto","node":3}
-{"t":"intent","id":6,"op":"annotate","node":3,"mode":"replace","note","nag","arrows","highlights"}
-{"t":"intent","id":7,"op":"new_game","fen":"<optional>"}
-{"t":"intent","id":8,"op":"match_start","seats":{"white","black"},"style":".."}
-{"t":"intent","id":9,"op":"match_stop"} | {"op":"set_seats","white","black"} | {"op":"set_style","style"}
+{"t":"intent","id":4,"tab":"t2","op":"play","move":"Nf3","from_node":11,"from_fen":".."}
+{"t":"intent","id":5,"tab":"t2","op":"goto","node":3}
+{"t":"intent","id":6,"tab":"t2","op":"annotate","node":3,"mode":"replace","note","nag","arrows","highlights"}
+{"t":"intent","id":7,"tab":"t2","op":"new_game","fen":"<optional>"}
+{"t":"intent","id":8,"tab":"t2","op":"match_start","seats":{"white","black"},"style":".."}
+{"t":"intent","id":9,"tab":"t2","op":"match_stop"} | {"op":"set_seats","white","black"} | {"op":"set_style","style"}
+{"t":"intent","id":10,"op":"tab_select","tab":"t1"}
+{"t":"intent","id":11,"op":"tab_new","name":null,"copy_of":null}
+{"t":"intent","id":12,"op":"tab_rename","tab":"t1","name":".."}
+{"t":"intent","id":13,"op":"tab_close","tab":"t1"}
 ```
 
-`from_fen` is still sent beside `from_node`; the program ignores it.
+Every game intent names its tab; the program refuses one that does not and changes nothing. `from_fen` is still sent beside `from_node`; the program ignores it.
 
 ### Remote mode
 
@@ -208,7 +216,24 @@ A frame replaces the last one when it comes from another program start or has a 
 
 The tree signature compares positions by FEN rather than UCI, because the page and the program write Chess960 castling differently. Evaluations are left out: the page's own engine writes them and they must not force a reload. The variant is part of the signature, so Chess960 position 518 does not pass for a standard game.
 
-Frames are not applied while our own intents are in flight (their frames would briefly undo the page; the last ack catches up) or while the person is in setup mode.
+Frames are not applied while our own intents for the shown tab are in flight (their frames would briefly undo the page; the last ack catches up) or while the person is in setup mode.
+
+### Board tabs
+
+The program holds several games as tabs and one board shows the selected one. The page remembers the tab it shows; the first frame sets it.
+
+- A frame whose `tab` is not the shown tab is a switch. It is loaded whole, with no animation, even when its game is one legal move ahead of the shown game; a move into an unrelated game would be meaningless motion. `isTabSwitch` decides it.
+- A switch drops the queued `goto` and the page's own move still in flight: the page shows the new tab at once, and the move still lands on the tab it was made on.
+- The load clears the selection and fires a `game:change` with reason `load`, which puts down a piece in hand.
+- Every game intent is stamped with the tab the page showed when the change was made, not when it is sent. A loaded game's intents all name the same tab even if a switch lands in the middle of them.
+- A window in setup stays in setup when the selection changes. Its commit goes to the tab it was started on; when it leaves setup it follows the selected tab.
+- The study title and notes live only in the page. They are kept per tab in memory and lost on reload. Orientation stays one value for the window.
+- Before a switch the controller calls its `beforeSwitch` listeners while the old tab is still shown. The notes panel uses it to send what was typed but not yet saved to the old tab, and ignores typing until it shows the new tab.
+- Intents made from the page's own game (moves, navigation, annotations, the setup commit) name the shown tab and read node ids from that tab's newest frame. The match controls (start, stop, seats, style, back to the game) name the selected tab, whose match the play control shows; in setup the two can differ.
+- A `stale` refusal is kept quiet only when it is for the shown tab and the page already shows that tab's game.
+- The AI chip counts an AI's seat only on the tab the presence message gives for it; on other tabs that AI is only connected.
+- The tab intents are `tab_select`, `tab_new`, `tab_rename` and `tab_close`. They name their own tab and do not hold back frames. Their refusals are shown like any other, except the board limit, which shows "Close a board first."
+- The program always sends `tab`. A frame without it reads as one unnamed board whose intents carry no tab; only the older shell tests send such frames.
 
 ### The echo guard
 

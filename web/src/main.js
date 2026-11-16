@@ -15,6 +15,7 @@ import { createMcpBridge } from './ai/mcpBridge.js';
 import { installApi } from './ai/api.js';
 import { connectRemoteSync } from './net/remoteSync.js';
 import { mountRemotePlay } from './ui/playPanel.js';
+import { mountBoardTabs } from './ui/boardTabs.js';
 
 const stage = document.getElementById('stage');
 const settings = () => store.state.settings;
@@ -374,10 +375,18 @@ if (bootModeled) {
 connectRemoteSync({ store, actions, mcp }).then(remote => {
   if (!remote) return;
 
+  remote.beforeSwitch(() => ui.leaveBoard());
+
   try {
     mountRemotePlay({ remote, ui });
   } catch (e) {
     console.warn('[rukh] could not show the play control:', e && e.message);
+  }
+
+  try {
+    mountBoardTabs({ remote, ui });
+  } catch (e) {
+    console.warn('[rukh] could not show the boards:', e && e.message);
   }
 });
 

@@ -115,16 +115,15 @@ fn the_selected_tab_entry_point_refuses_tab_intents() {
 }
 
 #[tokio::test]
-async fn the_socket_applies_intents_to_the_selected_tab_and_refuses_tab_intents() {
+async fn the_socket_takes_tab_intents_and_applies_game_intents_to_the_tab_they_name() {
     let server = serve("web").await;
     let hub = server.hub.clone();
     let (mut page, _) = view(server.port).await;
 
     let ack = intent(&mut page, 1, json!({"op": "tab_new"})).await;
-    assert_eq!(ack["error"]["code"], "bad_input", "{ack}");
-    assert_eq!(hub.latest().rev, 0);
+    assert_eq!(ack["result"], json!({"tab": "t2"}), "{ack}");
+    assert_eq!(hub.latest().rev, 1);
 
-    desk(&hub, json!({"op": "tab_new"}));
     let ack = intent(
         &mut page,
         2,
@@ -132,8 +131,9 @@ async fn the_socket_applies_intents_to_the_selected_tab_and_refuses_tab_intents(
     )
     .await;
     assert_eq!(ack["ok"], true, "{ack}");
-    assert_eq!(hub.read_on(tab("t2"), |t| t.board_rev()), Some(1));
-    assert_eq!(hub.read_on(tab("t1"), |t| t.board_rev()), Some(0));
+    assert_eq!(hub.selected(), tab("t2"));
+    assert_eq!(hub.read_on(tab("t1"), |t| t.board_rev()), Some(1));
+    assert_eq!(hub.read_on(tab("t2"), |t| t.board_rev()), Some(0));
 
     server.stop().await;
 }
@@ -865,6 +865,581 @@ fn a_tab_that_went_away_reads_as_a_closed_game() {
 
     let illegal = Error::IllegalMove("e5 is not legal here".into());
     assert_eq!(crate::mcp::core_refusal(&illegal), illegal.to_string());
+}
+
+// ------------------------------------------------------------------ the socket
+
+const NO_TAB: &str = "The intent must name its board, as in \"tab\":\"t1\". Nothing was changed.";
+
+const AI_TAB_INTENT: &str =
+    "Boards are opened, chosen and closed by the person; an AI cannot do it.";
+
+fn board(id: &str, name: &str) -> Value {
+    json!({"id": id, "name": name, "kind": "free", "mark": null})
+}
+
+/// Sends an intent exactly as given, with only `t` and `id` added.
+async fn ask(socket: &mut Socket, id: u64, mut body: Value) {
+    body["t"] = json!("intent");
+    body["id"] = json!(id);
+    send(socket, body).await;
+}
+
+/// The frame and then the ack an applied intent brings.
+async fn frame_then_ack(socket: &mut Socket, id: u64, body: Value) -> (Value, Value) {
+    ask(socket, id, body).await;
+
+    let frame = next_json(socket).await;
+    assert_eq!(frame["t"], "state", "{frame}");
+
+    let ack = next_json(socket).await;
+    assert_eq!(ack["id"], id, "{ack}");
+    (frame, ack)
+}
+
+/// The ack of an intent that brings no frame.
+async fn only_ack(socket: &mut Socket, id: u64, body: Value) -> Value {
+    ask(socket, id, body).await;
+
+    let ack = next_json(socket).await;
+    assert_eq!(ack["t"], "ack", "{ack}");
+    assert_eq!(ack["id"], id, "{ack}");
+    ack
+}
+
+fn refusal(id: u64, code: &str, message: &str) -> Value {
+    json!({"t": "ack", "id": id, "ok": false, "error": {"code": code, "message": message}})
+}
+
+/// Reads frames until the one with `rev`.
+async fn frame_at(socket: &mut Socket, rev: u64) -> Value {
+    loop {
+        let message = next_json(socket).await;
+        if message["t"] == "state" && message["rev"] == rev {
+            return message;
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_tab_intent_answers_with_its_result_after_its_frame() {
+    let server = serve("web").await;
+    let (mut page, _) = view(server.port).await;
+
+    let (frame, ack) = frame_then_ack(
+        &mut page,
+        1,
+        json!({"op": "tab_new", "name": null, "copy_of": null}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 1, "ok": true, "rev": 1, "result": {"tab": "t2"}})
+    );
+    assert_eq!(frame["rev"], 1);
+    assert_eq!(frame["tab"], "t2");
+    assert_eq!(
+        frame["hint"],
+        json!({"reason": "tab_new", "by": "view:1", "intent_id": 1})
+    );
+    assert_eq!(
+        frame["tabs"],
+        json!([board("t1", "Board 1"), board("t2", "Board 2")])
+    );
+    assert_eq!(frame["state"]["game"]["fen"], INITIAL_FEN);
+
+    let (frame, ack) = frame_then_ack(&mut page, 2, json!({"op": "tab_select", "tab": "t1"})).await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 2, "ok": true, "rev": 2, "result": {"selected": "t1"}})
+    );
+    assert_eq!(frame["tab"], "t1");
+    assert_eq!(frame["hint"]["reason"], "tab_select");
+
+    let (frame, ack) = frame_then_ack(
+        &mut page,
+        3,
+        json!({"op": "tab_rename", "tab": "t2", "name": "Italian, the Bc5 line"}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 3, "ok": true, "rev": 3,
+               "result": {"tab": "t2", "name": "Italian, the Bc5 line"}})
+    );
+    assert_eq!(frame["tab"], "t1");
+    assert_eq!(
+        frame["tabs"],
+        json!([board("t1", "Board 1"), board("t2", "Italian, the Bc5 line")])
+    );
+
+    let (frame, ack) = frame_then_ack(
+        &mut page,
+        4,
+        json!({"op": "tab_move", "tab": "t2", "to": 0}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 4, "ok": true, "rev": 4,
+               "result": {"tab": "t2", "order": ["t2", "t1"]}})
+    );
+    assert_eq!(frame["tabs"][0]["id"], "t2");
+
+    let (frame, ack) = frame_then_ack(&mut page, 5, json!({"op": "tab_close", "tab": "t1"})).await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 5, "ok": true, "rev": 5,
+               "result": {"closed": "t1", "selected": "t2"}})
+    );
+    assert_eq!(frame["tab"], "t2");
+    assert_eq!(frame["tabs"], json!([board("t2", "Italian, the Bc5 line")]));
+
+    let ack = only_ack(&mut page, 6, json!({"op": "tab_reopen"})).await;
+    assert_eq!(
+        ack,
+        refusal(6, "nothing_closed", "There is no closed board to reopen.")
+    );
+
+    // Selecting the tab already shown changes nothing and brings no frame.
+    let ack = only_ack(&mut page, 7, json!({"op": "tab_select", "tab": "t2"})).await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 7, "ok": true, "rev": 5, "result": {"selected": "t2"}})
+    );
+    assert_eq!(server.hub.latest().rev, 5);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_game_intent_without_its_tab_is_refused_and_changes_nothing() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+    let before = hub.latest().json.clone();
+
+    let bodies = [
+        json!({"op": "play", "move": "e4", "from_node": 0}),
+        json!({"op": "play", "move": "e4", "from_node": 0, "tab": null}),
+        json!({"op": "new_game"}),
+        json!({"op": "back"}),
+        json!({"op": "match_start", "seats": {"white": "human", "black": "ai"}}),
+    ];
+    for (i, body) in bodies.into_iter().enumerate() {
+        let id = i as u64 + 1;
+        let ack = only_ack(&mut page, id, body).await;
+        assert_eq!(ack, refusal(id, "bad_input", NO_TAB));
+    }
+
+    let ack = only_ack(&mut page, 9, json!({"op": "play", "move": "e4", "tab": 1})).await;
+    assert_eq!(
+        ack,
+        refusal(9, "bad_input", "tab must be a board id such as \"t1\"")
+    );
+
+    assert_eq!(hub.latest().json, before);
+    assert_eq!(hub.read(|t| t.board_rev()), 0);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn an_unknown_or_closed_tab_is_refused() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+
+    let ack = only_ack(
+        &mut page,
+        1,
+        json!({"op": "play", "move": "e4", "tab": "t9"}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        refusal(
+            1,
+            "unknown_tab",
+            "There is no open board \"t9\"; it may have been closed."
+        )
+    );
+
+    frame_then_ack(&mut page, 2, json!({"op": "tab_new"})).await;
+    frame_then_ack(&mut page, 3, json!({"op": "tab_close", "tab": "t2"})).await;
+    let before = hub.latest().json.clone();
+
+    let ack = only_ack(
+        &mut page,
+        4,
+        json!({"op": "play", "move": "e4", "tab": "t2"}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        refusal(
+            4,
+            "unknown_tab",
+            "There is no open board \"t2\"; it may have been closed."
+        )
+    );
+
+    for (id, body) in [
+        (5, json!({"op": "tab_select", "tab": "t2"})),
+        (6, json!({"op": "tab_rename", "tab": "t2", "name": "Back"})),
+        (7, json!({"op": "tab_close", "tab": "t2"})),
+        (8, json!({"op": "goto", "node": 0, "tab": "T1"})),
+    ] {
+        let ack = only_ack(&mut page, id, body).await;
+        assert_eq!(ack["error"]["code"], "unknown_tab", "{ack}");
+    }
+
+    assert_eq!(hub.latest().json, before);
+    assert_eq!(hub.read_desk(|d| d.tabs().len()), 1);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_move_made_for_one_tab_lands_there_after_another_window_selects_another() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut a, _) = view(server.port).await;
+    let (mut b, _) = view(server.port).await;
+
+    frame_then_ack(&mut a, 1, json!({"op": "tab_new"})).await;
+    frame_then_ack(&mut a, 2, json!({"op": "tab_select", "tab": "t1"})).await;
+    frame_at(&mut b, 2).await;
+
+    // B switches; A's move was made on t1 before A saw the switch.
+    frame_then_ack(&mut b, 1, json!({"op": "tab_select", "tab": "t2"})).await;
+    ask(
+        &mut a,
+        3,
+        json!({"op": "play", "move": "e4", "from_node": 0, "tab": "t1"}),
+    )
+    .await;
+    let ack = ack_for(&mut a, 3).await;
+    assert_eq!(ack["ok"], true, "{ack}");
+    assert_eq!(ack["rev"], 4);
+    assert_eq!(ack["result"]["node"], 1);
+
+    assert_eq!(hub.selected(), tab("t2"));
+    assert_eq!(hub.read_on(tab("t1"), |t| t.board_rev()), Some(1));
+    assert_eq!(hub.read_on(tab("t2"), |t| t.board_rev()), Some(0));
+
+    let frame = frame_at(&mut b, 4).await;
+    assert_eq!(frame["tab"], "t2");
+    assert_eq!(frame["state"]["game"]["fen"], INITIAL_FEN);
+    assert_eq!(frame["hint"]["reason"], "move");
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn acks_never_precede_their_frame_when_tab_and_game_intents_are_mixed() {
+    let server = serve("web").await;
+    let (mut page, _) = view(server.port).await;
+
+    let burst = [
+        json!({"op": "tab_new"}),
+        json!({"op": "play", "move": "e4", "from_node": 0, "tab": "t1"}),
+        json!({"op": "play", "move": "d4", "from_node": 0, "tab": "t2"}),
+        json!({"op": "tab_select", "tab": "t1"}),
+        json!({"op": "play", "move": "e5", "from_node": 1, "tab": "t1"}),
+        json!({"op": "tab_rename", "tab": "t2", "name": "Queen's pawn"}),
+        json!({"op": "tab_new", "copy_of": "t1"}),
+        json!({"op": "tab_close", "tab": "t2"}),
+    ];
+    let count = burst.len();
+    for (i, body) in burst.into_iter().enumerate() {
+        ask(&mut page, i as u64 + 1, body).await;
+    }
+
+    let mut seen_rev = 0;
+    let mut acks = 0;
+    while acks < count {
+        let message = next_json(&mut page).await;
+        match message["t"].as_str() {
+            Some("state") => seen_rev = seen_rev.max(message["rev"].as_u64().expect("rev")),
+            Some("ack") => {
+                assert_eq!(message["ok"], true, "{message}");
+                let rev = message["rev"].as_u64().expect("ack rev");
+                assert!(seen_rev >= rev, "ack for rev {rev} came before its frame");
+                acks += 1;
+            }
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+    assert_eq!(seen_rev, count as u64);
+
+    let frame = frame_value(&server.hub);
+    assert_eq!(frame["tab"], "t3");
+    assert_eq!(
+        frame["tabs"],
+        json!([board("t1", "Board 1"), board("t3", "Board 2")])
+    );
+    assert_eq!(frame["state"]["game"]["nodes"][2]["san"], "e5");
+
+    server.stop().await;
+}
+
+#[test]
+fn an_ai_cannot_send_a_tab_intent() {
+    let hub = Hub::new("test".into());
+
+    for body in [
+        json!({"op": "tab_new"}),
+        json!({"op": "tab_select", "tab": "t1"}),
+        json!({"op": "tab_rename", "tab": "t1", "name": "Mine"}),
+        json!({"op": "tab_close", "tab": "t1"}),
+        json!({"op": "tab_move", "tab": "t1", "to": 0}),
+    ] {
+        let refused = hub
+            .apply_desk("ai:guest", &body.to_string(), None)
+            .expect_err("an AI sends no tab intent");
+        assert_eq!(refused.code(), "bad_input");
+        assert_eq!(refused.to_string(), AI_TAB_INTENT);
+    }
+
+    assert_eq!(hub.latest().rev, 0);
+    assert_eq!(hub.read_desk(|d| d.tabs().len()), 1);
+    assert_eq!(hub.tab_name(tab("t1")).as_deref(), Some("Board 1"));
+}
+
+#[tokio::test]
+async fn closing_the_ais_tab_from_the_socket_ends_its_wait_and_moves_every_view() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (ai, _) = Ai::connect(server.port, "seated").await;
+    seat_black(&ai).await;
+    let (mut a, _) = view(server.port).await;
+    let (mut b, _) = view(server.port).await;
+
+    frame_then_ack(&mut a, 1, json!({"op": "tab_new"})).await;
+    frame_then_ack(&mut a, 2, json!({"op": "tab_select", "tab": "t1"})).await;
+    let shown = frame_at(&mut b, 3).await;
+    assert_eq!(shown["tab"], "t1");
+    assert_eq!(mark_of(&shown, "t1"), "your_move");
+
+    let pending = spawn_wait(&ai, json!({"seat": "black", "timeout_s": 20}));
+    until("the wait to start", || hub.presence().is_waiting(&ai.by)).await;
+
+    let (_, ack) = frame_then_ack(&mut a, 3, json!({"op": "tab_close", "tab": "t1"})).await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 3, "ok": true, "rev": 4,
+               "result": {"closed": "t1", "selected": "t2"}})
+    );
+
+    let result = finish(pending).await;
+    assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(
+        *structured(&result),
+        json!({"event": "game_over", "stopped": "tab_closed", "message": TAB_CLOSED_LINE})
+    );
+
+    let moved = frame_at(&mut b, 4).await;
+    assert_eq!(moved["tab"], "t2");
+    assert_eq!(
+        moved["hint"],
+        json!({"reason": "tab_close", "by": "view:1", "intent_id": 3})
+    );
+    assert_eq!(moved["tabs"], json!([board("t2", "Board 2")]));
+    assert_eq!(moved["state"]["game"]["fen"], INITIAL_FEN);
+    assert_eq!(moved["state"]["match"]["active"], false);
+    assert_eq!(presence_ais(&hub)[0]["tab"], Value::Null);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn two_views_receive_the_same_frame_when_one_selects_a_tab() {
+    let server = serve("web").await;
+    let (mut a, _) = view(server.port).await;
+    let (mut b, _) = view(server.port).await;
+
+    frame_then_ack(&mut a, 1, json!({"op": "tab_new"})).await;
+    ask(
+        &mut a,
+        2,
+        json!({"op": "play", "move": "Nf3", "from_node": 0, "tab": "t2"}),
+    )
+    .await;
+    ack_for(&mut a, 2).await;
+    frame_at(&mut b, 2).await;
+
+    let (on_b, _) = frame_then_ack(&mut b, 1, json!({"op": "tab_select", "tab": "t1"})).await;
+    let on_a = frame_at(&mut a, 3).await;
+
+    assert_eq!(on_a, on_b);
+    assert_eq!(on_a["tab"], "t1");
+    assert_eq!(
+        on_a["hint"],
+        json!({"reason": "tab_select", "by": "view:2", "intent_id": 1})
+    );
+    assert_eq!(on_a["state"]["game"]["fen"], INITIAL_FEN);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_tab_at_the_limit_is_refused() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+
+    for id in 1..12 {
+        let (_, ack) = frame_then_ack(&mut page, id, json!({"op": "tab_new"})).await;
+        assert_eq!(ack["ok"], true, "{ack}");
+    }
+    assert_eq!(hub.read_desk(|d| d.tabs().len()), 12);
+    let before = hub.latest().json.clone();
+
+    let ack = only_ack(&mut page, 12, json!({"op": "tab_new"})).await;
+    assert_eq!(ack, refusal(12, "tab_limit", "Close a board first."));
+    let ack = only_ack(&mut page, 13, json!({"op": "tab_new", "copy_of": "t1"})).await;
+    assert_eq!(ack, refusal(13, "tab_limit", "Close a board first."));
+
+    assert_eq!(hub.latest().json, before);
+    assert_eq!(hub.read_desk(|d| d.tabs().len()), 12);
+
+    // Closing one makes room again, and the new tab takes a new id.
+    frame_then_ack(&mut page, 14, json!({"op": "tab_close", "tab": "t5"})).await;
+    let (_, ack) = frame_then_ack(&mut page, 15, json!({"op": "tab_new"})).await;
+    assert_eq!(ack["result"], json!({"tab": "t13"}));
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_rename_to_an_invisible_name_is_refused_and_names_are_cleaned() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+
+    let ack = only_ack(
+        &mut page,
+        1,
+        json!({"op": "tab_rename", "tab": "t1", "name": "\u{200B} \u{FEFF}\t\u{202E}"}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        refusal(
+            1,
+            "bad_input",
+            "A board needs a name with at least one visible character."
+        )
+    );
+    assert_eq!(hub.latest().rev, 0);
+    assert_eq!(hub.tab_name(tab("t1")).as_deref(), Some("Board 1"));
+
+    let long = format!("  Ruy\u{0007}   {}", "L".repeat(60));
+    let (_, ack) = frame_then_ack(
+        &mut page,
+        2,
+        json!({"op": "tab_rename", "tab": "t1", "name": long}),
+    )
+    .await;
+    let cleaned = format!("Ruy {}", "L".repeat(36));
+    assert_eq!(ack["result"], json!({"tab": "t1", "name": cleaned}));
+    assert_eq!(hub.tab_name(tab("t1")), Some(cleaned));
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_and_malformed_tab_messages_leave_the_socket_open() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+    let before = hub.latest().json.clone();
+
+    ask(
+        &mut page,
+        1,
+        json!({"op": "tab_rename", "tab": "t1", "name": "x".repeat(100_000)}),
+    )
+    .await;
+    let ack = next_json(&mut page).await;
+    assert_eq!(ack["id"], 1, "{ack}");
+    assert_eq!(ack["error"]["code"], "bad_input");
+    assert!(
+        ack["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("the limit is 65536")),
+        "{ack}"
+    );
+
+    let malformed = [
+        json!({"op": "tab_select"}),
+        json!({"op": "tab_select", "tab": 7}),
+        json!({"op": "tab_select", "tab": null}),
+        json!({"op": "tab_new", "name": 5}),
+        json!({"op": "tab_rename", "tab": "t1"}),
+        json!({"op": "tab_move", "tab": "t1", "to": -1}),
+        json!({"op": "tab_move", "tab": "t1", "to": 1e30}),
+        json!({"op": "tab_close", "tab": ["t1"]}),
+        json!({"op": "tab_wander", "tab": "t1"}),
+    ];
+    for (i, body) in malformed.into_iter().enumerate() {
+        let id = i as u64 + 2;
+        let ack = only_ack(&mut page, id, body).await;
+        assert_eq!(ack["ok"], false, "{ack}");
+        assert_eq!(ack["error"]["code"], "bad_input", "{ack}");
+    }
+
+    let ack = only_ack(
+        &mut page,
+        20,
+        json!({"op": "tab_move", "tab": "t1", "to": 1}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        refusal(20, "bad_input", "to must be a place from 0 to 0")
+    );
+
+    for (id, text) in [
+        (
+            21,
+            r#"{"t":"intent","id":21,"op":"tab_select","tab":"t1","tab":"t1"}"#,
+        ),
+        (
+            22,
+            r#"{"t":"intent","id":22,"tab":"t1","tab":"t1","op":"play","move":"e4"}"#,
+        ),
+        (
+            23,
+            r#"{"t":"intent","id":23,"op":"play","op":"tab_new","tab":"t1"}"#,
+        ),
+    ] {
+        page.send(Message::Text(text.into())).await.expect("send");
+        let ack = next_json(&mut page).await;
+        assert_eq!(ack["id"], id, "{ack}");
+        assert_eq!(ack["error"]["code"], "bad_input", "{ack}");
+        assert!(
+            ack["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("duplicate field")),
+            "{ack}"
+        );
+    }
+
+    assert_eq!(hub.latest().json, before);
+    assert_eq!(hub.read_desk(|d| d.tabs().len()), 1);
+
+    let (frame, ack) = frame_then_ack(
+        &mut page,
+        30,
+        json!({"op": "play", "move": "e4", "from_node": 0, "tab": "t1"}),
+    )
+    .await;
+    assert_eq!(frame["rev"], 1);
+    assert_eq!(ack["ok"], true, "{ack}");
+
+    server.stop().await;
 }
 
 // ------------------------------------------------------------------ the published surface

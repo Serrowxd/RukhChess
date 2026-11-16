@@ -46,6 +46,15 @@ fn refused(id: &Value, code: &str, message: String) -> Ack {
     }
 }
 
+const NO_TAB: &str = "The intent must name its board, as in \"tab\":\"t1\". Nothing was changed.";
+
+fn is_tab_intent(value: &Value) -> bool {
+    value
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("tab_"))
+}
+
 /// None for messages that need no answer.
 pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
     if text.len() > MAX_MESSAGE_BYTES {
@@ -80,7 +89,12 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
     }
 
     let id = value.get("id").cloned().unwrap_or(Value::Null);
-    Some(match hub.apply(who, text, id.as_u64()) {
+
+    if !is_tab_intent(&value) && matches!(value.get("tab"), None | Some(Value::Null)) {
+        return Some(refused(&id, "bad_input", NO_TAB.to_string()));
+    }
+
+    Some(match hub.apply_desk(who, text, id.as_u64()) {
         Ok(applied) => Ack {
             json: json!({
                 "t": "ack", "id": id, "ok": true, "rev": applied.rev, "result": applied.result,

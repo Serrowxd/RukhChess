@@ -291,7 +291,7 @@ async fn hello_names_the_app() {
     assert_eq!(status, 200);
     let hello: Value = serde_json::from_str(&body).expect("JSON");
     assert_eq!(hello["app"], "rukh");
-    assert_eq!(hello["proto"], 1);
+    assert_eq!(hello["proto"], 2);
     assert_eq!(hello["port"], server.port);
     assert_eq!(hello["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(hello["instance"], server.hub.instance());
@@ -431,6 +431,9 @@ async fn view(port: u16) -> (Socket, Value) {
 async fn intent(socket: &mut Socket, id: u64, mut body: Value) -> Value {
     body["t"] = json!("intent");
     body["id"] = json!(id);
+    if body.get("tab").is_none() {
+        body["tab"] = json!("t1");
+    }
 
     send(socket, body).await;
     ack_for(socket, id).await
@@ -444,7 +447,7 @@ async fn socket_gets_hello_then_state_and_acks_never_precede_their_frame() {
 
     let hello = next_any(&mut a).await;
     assert_eq!(hello["t"], "hello");
-    assert_eq!(hello["proto"], 1);
+    assert_eq!(hello["proto"], 2);
     assert_eq!(hello["instance"], server.hub.instance());
     assert!(hello["you"]
         .as_str()
@@ -463,7 +466,7 @@ async fn socket_gets_hello_then_state_and_acks_never_precede_their_frame() {
     for (i, mv) in moves.iter().enumerate() {
         send(
             &mut a,
-            json!({"t": "intent", "id": i + 1, "op": "play", "move": mv, "from_node": i}),
+            json!({"t": "intent", "id": i + 1, "tab": "t1", "op": "play", "move": mv, "from_node": i}),
         )
         .await;
     }
@@ -559,7 +562,11 @@ async fn socket_refusals_change_nothing() {
     assert_eq!(server.hub.latest().rev, 1);
 
     // New game: frame first, then the ack.
-    send(&mut a, json!({"t": "intent", "id": 7, "op": "new_game"})).await;
+    send(
+        &mut a,
+        json!({"t": "intent", "id": 7, "tab": "t1", "op": "new_game"}),
+    )
+    .await;
     let frame = next_json(&mut a).await;
     assert_eq!(frame["rev"], 2);
     assert_eq!(frame["hint"]["reason"], "new_game");
@@ -658,7 +665,7 @@ async fn socket_carries_navigation_and_match_intents() {
 async fn an_oversized_message_gets_a_readable_refusal() {
     let server = serve("web").await;
     let (mut a, _) = view(server.port).await;
-    let huge = json!({"t": "intent", "id": 7, "op": "play", "move": "Z".repeat(200_000),
+    let huge = json!({"t": "intent", "id": 7, "tab": "t1", "op": "play", "move": "Z".repeat(200_000),
                       "from_node": 0});
     send(&mut a, huge).await;
     let ack = next_json(&mut a).await;
@@ -675,7 +682,7 @@ async fn an_oversized_message_gets_a_readable_refusal() {
     // The socket and the game carry on.
     send(
         &mut a,
-        json!({"t": "intent", "id": 8, "op": "play", "move": "e4", "from_node": 0}),
+        json!({"t": "intent", "id": 8, "tab": "t1", "op": "play", "move": "e4", "from_node": 0}),
     )
     .await;
     assert_eq!(next_json(&mut a).await["rev"], 1);

@@ -229,7 +229,7 @@ function harness() {
 
   const ws = FakeSocket.last;
   ws.onopen();
-  ws.receive({ t: 'hello', proto: 1, instance: 'i1', you: 'view:1' });
+  ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: 'view:1' });
 
   const moves = [];
   st.on('game:change', p => moves.push(p));

@@ -89,7 +89,6 @@ pub enum Intent {
 
 impl Intent {
     pub fn from_json(text: &str) -> Result<Intent, crate::Error> {
-        serde_json::from_str(text)
-            .map_err(|e| crate::Error::BadInput(format!("the intent could not be read: {e}")))
+        serde_json::from_str(text).map_err(crate::Error::unreadable)
     }
 }

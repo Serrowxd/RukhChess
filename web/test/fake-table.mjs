@@ -226,3 +226,153 @@ export function createFakeTable({ instance = 'fake' } = {}) {
     idOf, byId,
   };
 }
+
+const MAX_FREE_TABS = 12;
+const NO_TAB = 'The intent must name its board, as in "tab":"t1". Nothing was changed.';
+
+const unknownTab = id => ({ ok: false, error: { code: 'unknown_tab', message: `There is no open board "${id}"; it may have been closed.` } });
+const badInput = message => ({ ok: false, error: { code: 'bad_input', message } });
+
+const INVISIBLE = /[\u{AD}\u{34F}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}-\u{180F}\u{200B}-\u{200F}\u{202A}-\u{202E}\u{2060}-\u{206F}\u{3164}\u{FE00}-\u{FE0F}\u{FEFF}\u{FFA0}\u{FFF9}-\u{FFFB}\u{E0000}-\u{E007F}]/gu;
+
+/** A name cleaned as the program cleans it. */
+export function cleanTabName(raw) {
+  const text = String(raw)
+    .replace(/[\s\u{85}]/gu, ' ')
+    .replace(/\p{Cc}/gu, '')
+    .replace(INVISIBLE, '')
+    .replace(/ +/g, ' ')
+    .trimStart();
+
+  return Array.from(text).slice(0, 40).join('').trimEnd();
+}
+
+/** Several stand-in tables as tabs, with one rev for all of them. */
+export function createFakeDesk({ instance = 'fake' } = {}) {
+  const tabs = [];
+  let nextTab = 1;
+  let rev = 0;
+  let hint = { reason: 'init', by: 'rukh' };
+
+  const find = id => tabs.find(t => t.id === id) || null;
+
+  function freeName() {
+    for (let n = 1; ; n++) {
+      if (!tabs.some(t => t.name === `Board ${n}`)) return `Board ${n}`;
+    }
+  }
+
+  function make() {
+    const tab = { id: `t${nextTab++}`, name: freeName(), kind: 'free', table: createFakeTable({ instance }) };
+    tabs.push(tab);
+    return tab;
+  }
+
+  let selected = make().id;
+
+  function changed(by, reason) {
+    rev++;
+    hint = { reason, by };
+  }
+
+  function applyTab(by, intent) {
+    const op = intent.op;
+
+    if (op === 'tab_new') {
+      if (tabs.filter(t => t.kind === 'free').length >= MAX_FREE_TABS) return { ok: false, error: { code: 'tab_limit', message: 'Close a board first.' } };
+
+      selected = make().id;
+      changed(by, op);
+      return { ok: true, result: { tab: selected } };
+    }
+
+    if (typeof intent.tab !== 'string') return badInput('the intent could not be read: missing field `tab`');
+
+    const tab = find(intent.tab);
+    if (!tab) return unknownTab(intent.tab);
+
+    if (op === 'tab_select') {
+      if (selected !== tab.id) {
+        selected = tab.id;
+        changed(by, op);
+      }
+
+      return { ok: true, result: { selected } };
+    }
+
+    if (op === 'tab_rename') {
+      const name = cleanTabName(intent.name ?? '');
+      if (!name) return badInput('A board needs a name with at least one visible character.');
+
+      if (tab.name !== name) {
+        tab.name = name;
+        changed(by, op);
+      }
+
+      return { ok: true, result: { tab: tab.id, name } };
+    }
+
+    if (op === 'tab_close') {
+      const at = tabs.indexOf(tab);
+      tabs.splice(at, 1);
+      if (!tabs.length) make();
+
+      if (selected === tab.id) selected = (tabs[at] || tabs[at - 1]).id;
+
+      changed(by, op);
+      return { ok: true, result: { closed: tab.id, selected } };
+    }
+
+    return badInput(`the intent could not be read: unknown op ${op}`);
+  }
+
+  /** A view's game intent must name its tab; an AI's lands on the selected tab. */
+  function apply(by, intent) {
+    const isView = by.startsWith('view:');
+    const op = intent && intent.op;
+
+    if (typeof op === 'string' && op.startsWith('tab_')) {
+      if (!isView) return badInput('only a view can change the boards');
+      return applyTab(by, intent);
+    }
+
+    let tab = find(selected);
+
+    if (isView) {
+      if (intent.tab === undefined || intent.tab === null) return badInput(NO_TAB);
+      if (typeof intent.tab !== 'string') return badInput('tab must be a board id such as "t1"');
+
+      tab = find(intent.tab);
+      if (!tab) return unknownTab(intent.tab);
+    }
+
+    const { tab: _named, ...rest } = intent;
+    const before = tab.table.rev;
+    const res = tab.table.apply(by, rest);
+
+    if (tab.table.rev !== before) {
+      rev++;
+      hint = tab.table.frame().hint;
+    }
+
+    return res;
+  }
+
+  function frame(nowMs = 0) {
+    const shown = find(selected);
+
+    return {
+      ...shown.table.frame(nowMs), rev, hint,
+      tab: shown.id,
+      tabs: tabs.map(t => ({ id: t.id, name: t.name, kind: t.kind, mark: null })),
+    };
+  }
+
+  return {
+    apply, frame,
+    get rev() { return rev; },
+    get selected() { return selected; },
+    table: id => (find(id) || {}).table || null,
+    tabs: () => tabs.map(t => ({ id: t.id, name: t.name })),
+  };
+}

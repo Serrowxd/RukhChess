@@ -4,14 +4,14 @@ How `crates/rukh` works today. The design and later steps are in `architecture.m
 
 ## What it is
 
-`rukh` owns one chess game. Board pages connect over a WebSocket at `/api/ws`. AI clients connect over MCP at `/mcp` on the same port. Everything listens on `127.0.0.1` only.
+`rukh` holds the chess games, one per tab. Board pages connect over a WebSocket at `/api/ws`. AI clients connect over MCP at `/mcp` on the same port. Everything listens on `127.0.0.1` only.
 
 The modules:
 
 - `main.rs` parses the command line, binds the port, starts the server, opens the board and waits for Ctrl+C.
 - `cli.rs` reads the flags and finds the built board.
 - `http.rs` is the router, the Host/Origin guard and the static files.
-- `hub.rs` is the one place the game changes.
+- `hub.rs` is the one place the games change.
 - `ws.rs` is the board page's socket.
 - `mcp.rs` is the MCP tools, prompts and instructions.
 - `presence.rs` tracks open views and connected AI clients.
@@ -25,7 +25,7 @@ A folder that already holds `index.html` wins. Otherwise the checkout's `web/dis
 
 ## The hub
 
-Every view and every AI client goes through `Hub`. It holds the table (the game, the match and the counters) behind one lock.
+Every view and every AI client goes through `Hub`. It holds the desk (the tabs, each with its game, match and counters) behind one lock.
 
 After each change it publishes the full frame on a watch channel. A late or slow reader always ends up on the latest frame. The frame is published before the lock is released, so frames leave in the same order as the changes that made them. Nothing is awaited while the lock is held.
 
@@ -33,13 +33,13 @@ If a thread panics while holding the lock, the lock is taken anyway. This is saf
 
 ## Tabs
 
-The hub holds a desk of tabs (see `core.md`), each a whole table. One tab is selected, and every view shows it. The page has no way to make a second tab. With one tab, the hub, presence and MCP behave as described in the rest of this file.
+The hub holds a desk of tabs (see `core.md`), each a whole table. One tab is selected, and every view shows it. Views open, select, rename, move and close tabs over the socket. With one tab, the hub, presence and MCP behave as described in the rest of this file. Tabs live in memory only; they are lost when the program stops.
 
 The hub's entry points:
 
-- `apply`, `read`, `latest` and `subscribe` mean the selected tab. The socket uses `apply`, so a view's intent lands on the selected tab. The socket does not accept tab intents.
+- `apply`, `read`, `latest` and `subscribe` mean the selected tab. Only the tests call `apply`.
 - `apply_on` and `read_on` name a tab, shown or not. MCP uses them.
-- `apply_desk` takes tab intents, and game intents for the tab they name. Only the tests call it.
+- `apply_desk` takes tab intents, and game intents for the tab they name. The socket uses it.
 
 A change on any tab raises the one `rev` and republishes the selected tab's frame. Hidden changes cost a resend, but they keep the marks current, and they wake every `wait`, which then looks at its own tab.
 
@@ -96,7 +96,26 @@ Request paths are decoded and checked before use. Anything that could step outsi
 
 The server sends `hello`, then the current state frame, then every later frame. A slow socket may skip frames but always ends on the latest.
 
-The page sends intents and gets one `ack` for each. An intent is the whole message, `{"t":"intent","id":n,"op":...}`; the table reads `op` and its fields and ignores `t` and `id`. Other message types are ignored, so an older program keeps working with a newer page.
+The hello carries `proto`, which is 2. `/api/hello` carries the same number. A page built for another number stops and asks to be rebuilt.
+
+The page sends intents and gets one `ack` for each. An intent is the whole message, `{"t":"intent","id":n,"tab":"t1","op":...}`; the table reads `op` and its fields and ignores `t` and `id`. Other message types are ignored, so an older program keeps working with a newer page.
+
+A game intent must name its tab. One with no `tab`, or a `null` one, is refused with `bad_input` before the intent itself is read. One for a tab that is not open is refused with `unknown_tab`. A repeated key is refused. Nothing changes in any of these cases. An intent lands on the tab it names whether or not that tab is shown, so a move sent just as another window switches tabs stays on the game it was made on.
+
+Tab intents (`tab_select`, `tab_new`, `tab_rename`, `tab_close`, `tab_move`, `tab_reopen`) put the tab they act on in `tab`; `tab_new` and `tab_reopen` have none. Their results:
+
+- `tab_select`: `{"selected":"t2"}`
+- `tab_new`: `{"tab":"t2"}`; the new tab is selected. At 12 free tabs it is refused with `tab_limit`, "Close a board first."
+- `tab_rename`: `{"tab":"t2","name":"..."}`, the name as cleaned. A name with nothing visible is refused with `bad_input`.
+- A `tab_new` name with nothing visible is not refused; the tab gets the next default name, as with no name.
+- Names are cleaned the same way everywhere: control and invisible characters are dropped, a line break or a tab reads as a space, runs of spaces become one, and the name is cut at 40 characters.
+- `tab_close`: `{"closed":"t1","selected":"t2"}`. The game is dropped. Closing the last tab leaves a fresh "Board 1". Closing the tab an AI plays on ends its `wait` with `tab_closed`.
+- `tab_move`: `{"tab":"t2","order":["t2","t1"]}`
+- `tab_reopen`: always refused with `nothing_closed`, since closed tabs are not kept.
+
+A tab intent that changes nothing, such as selecting the tab already shown, is acknowledged with the current `rev` and sends no frame. An intent that cannot be read is refused with `bad_input`; the parser's message in it is cut at 400 characters, so a long unknown `op` is not sent back whole. Only views send tab intents; an `ai:` actor is refused, and no MCP tool sends one.
+
+Every frame carries `tab`, the selected tab, and `tabs`, the strip in order with each tab's `id`, `name`, `kind` and `mark`. `state` is the selected tab's state.
 
 One loop per socket does all the writing. Before an ack it sends a frame at least as new as the ack, so when the page sees an ack its board already shows the result.
 
