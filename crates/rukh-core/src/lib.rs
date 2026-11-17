@@ -13,14 +13,19 @@ use shakmaty::{
 pub mod chess960;
 pub mod desk;
 pub mod intent;
+pub mod saved;
 pub mod session;
 pub mod table;
 
 pub use desk::{
-    clean_tab_name, Desk, Mark, Tab, TabEntry, TabId, TabIntent, TabKind, MAX_FREE_TABS,
-    MAX_TAB_NAME_CHARS,
+    clean_tab_name, Desk, Mark, Tab, TabEntry, TabId, TabIntent, TabKind, Unsaved, MAX_FREE_TABS,
+    MAX_TAB_NAME_CHARS, MAX_TAB_NUMBER, NOTHING_CLOSED,
 };
 pub use intent::{AnnotateMode, Intent};
+pub use saved::{
+    tab_id_in_file_name, Damaged, Extra, InnerExtra, SavedBody, SavedGame, SavedIndex, SavedMatch,
+    SavedMove, SavedNotes, SavedTab, SavedTable, Stopped, MAX_SAVED_COUNT, SAVED_VERSION,
+};
 pub use session::{MatchState, Seat, Seats, Session, Side, Study, Style, StyleInfo};
 pub use table::{
     Actor, Applied, AppliedCounts, Change, ChangeReport, LastMove, MatchBody, PathStep,
@@ -361,7 +366,9 @@ fn make_fen(pos: &Chess) -> String {
 }
 
 fn ply_of(pos: &Chess) -> u32 {
-    (pos.fullmoves().get() - 1) * 2 + u32::from(pos.turn() == Color::Black)
+    (pos.fullmoves().get() - 1)
+        .saturating_mul(2)
+        .saturating_add(u32::from(pos.turn() == Color::Black))
 }
 
 impl Game {
@@ -701,7 +708,7 @@ impl Game {
                     id,
                     parent: Some(self.current),
                     children: Vec::new(),
-                    ply: self.current_node().ply + 1,
+                    ply: self.current_node().ply.saturating_add(1),
                     san: Some(san.clone()),
                     uci: Some(uci.clone()),
                     fen: make_fen(&next),

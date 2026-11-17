@@ -477,6 +477,23 @@ export function mainlineMoves(game) {
   return out;
 }
 
+/** Notice codes that report a repair rather than a loss. */
+const REPAIR_NOTICES = new Set(['index_rebuilt', 'added', 'selection_lost', 'fresh_board']);
+
+/** Whether boards are saved, and the program's notices about them; anything unreadable counts as not saved. */
+export function readBoards(body) {
+  if (!isObject(body)) return { saving: false, notices: [] };
+
+  const notices = (Array.isArray(body.notices) ? body.notices : [])
+    .filter(n => isObject(n) && Number.isFinite(n.id) && typeof n.text === 'string' && n.text)
+    .map(n => ({ id: n.id, code: typeof n.code === 'string' ? n.code : '', text: n.text }));
+
+  return { saving: body.saving === true, notices };
+}
+
+/** The toast kind a notice is shown with. */
+export const noticeKind = code => (REPAIR_NOTICES.has(code) ? 'info' : 'error');
+
 // Shell: probe
 
 /** The hello body when the serving host is Rukh, else null; no request unless served over http(s). */
@@ -564,6 +581,9 @@ export function startRemoteSync(deps) {
   let shownFrame = null; // the newest frame for that tab
   const tabMeta = new Map(); // tab id -> the page-only study fields
   const leaving = new Set(); // called before the page leaves a tab
+  let boards = readBoards(null);
+  let helloInstance = null;
+  const shownNotices = new Set(); // "instance:id" of every notice already shown
 
   const isOpen = () => sock && sock.readyState === 1;
   let presence = null;
@@ -795,6 +815,21 @@ export function startRemoteSync(deps) {
     if (!pending.size) batchDone();
   }
 
+  /** Each notice is shown once per page load; a new program start numbers its notices from 1 again. */
+  function takeBoards(body) {
+    boards = readBoards(body);
+
+    for (const notice of boards.notices) {
+      const key = `${helloInstance}:${notice.id}`;
+      if (shownNotices.has(key)) continue;
+
+      shownNotices.add(key);
+      actions.toast(notice.text, noticeKind(notice.code));
+    }
+
+    notify();
+  }
+
   function onMessage(raw) {
     let msg;
 
@@ -810,8 +845,16 @@ export function startRemoteSync(deps) {
       if (msg.proto !== PROTO) {
         actions.toast(`The Rukh program speaks protocol ${msg.proto}; this page speaks ${PROTO}. Rebuild the board.`, 'error');
         stop();
+        return;
       }
 
+      helloInstance = typeof msg.instance === 'string' ? msg.instance : null;
+      takeBoards(msg.boards);
+      return;
+    }
+
+    if (msg.t === 'boards') {
+      takeBoards(msg);
       return;
     }
 
@@ -1046,6 +1089,9 @@ export function startRemoteSync(deps) {
     snapshot: latestGame,
     state: () => (latest && isObject(latest.state) ? latest.state : null),
     presence: () => presence,
+
+    /** Whether the program saves boards, and its notices about them. */
+    boards: () => ({ saving: boards.saving, notices: boards.notices.slice() }),
 
     /** The selected tab and the list the strip draws. */
     tabs: () => readTabs(latest),

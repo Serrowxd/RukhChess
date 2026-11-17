@@ -23,10 +23,11 @@ Usage: rukh [--port N] [--open window|browser|none] [--web-dir PATH] [--data-dir
   --web-dir PATH   Folder holding the built board (index.html). Defaults to web/dist
                    of the Rukh checkout, found from the program's folder or the
                    current folder.
-  --data-dir PATH  Folder for the program's own files (for now only the window's
-                   browser profile, created when the window first opens). Defaults to
-                   %LOCALAPPDATA%\\Rukh on Windows, ~/Library/Application Support/Rukh
-                   on macOS, $XDG_DATA_HOME/rukh or ~/.local/share/rukh on Linux.
+  --data-dir PATH  Folder for the program's own files: the saved boards (boards/) and
+                   the window's browser profile. Defaults to %LOCALAPPDATA%\\Rukh on
+                   Windows, ~/Library/Application Support/Rukh on macOS,
+                   $XDG_DATA_HOME/rukh or ~/.local/share/rukh on Linux. A second Rukh
+                   on the same folder keeps its boards in memory and saves nothing.
   --help           Show this text.
   --version        Show the version.";
 

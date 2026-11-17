@@ -577,3 +577,145 @@ test('a study title still being typed when the board switches stays with its boa
 
   pr.done();
 });
+
+const { startRemoteSync } = await import('../src/net/remoteSync.js');
+const { createStore } = await import('../src/core/store.js');
+const { createDialogs } = await import('../src/ui/dialogs.js');
+const { FakeSocket } = await import('./fake-program.mjs');
+
+const SAVING = { saving: true, notices: [] };
+
+// Longer than any reconnect wait, and as long as the acks' own timeout.
+const ACK_TIMEOUT_MS = 60000;
+
+/** One page on its own socket whose hello carries `boards`; `reconnect` drops the socket and says hello again. */
+function lonePage(boards) {
+  const timers = new Map();
+  let nextTimer = 1;
+  const setTimeout = (fn, ms) => { timers.set(nextTimer, { fn, ms }); return nextTimer++; };
+  const clearTimeout = id => { timers.delete(id); };
+
+  const st = createStore({ storage: null });
+  const toasts = [];
+  st.actions.toast = (text, kind) => { toasts.push({ text, kind }); };
+
+  const remote = startRemoteSync({ store: st, actions: st.actions, location: { href: 'http://127.0.0.1:47480/' }, WebSocket: FakeSocket, ackTimeoutMs: ACK_TIMEOUT_MS, setTimeout, clearTimeout });
+  let ws = FakeSocket.last;
+
+  const hello = (instance, body) => {
+    ws.onopen();
+    ws.receive({ t: 'hello', proto: 2, instance, you: 'view:1', boards: body });
+  };
+  hello('i1', boards);
+
+  const reconnect = (body, instance = 'i1') => {
+    ws.onclose();
+
+    for (const [id, timer] of [...timers]) {
+      if (timer.ms >= ACK_TIMEOUT_MS) continue;
+
+      timers.delete(id);
+      timer.fn();
+    }
+
+    ws = FakeSocket.last;
+    hello(instance, body);
+  };
+
+  return {
+    remote, toasts, reconnect,
+    receive: msg => ws.receive(msg),
+    done: () => { remote.stop(); st.dispose(); },
+  };
+}
+
+const BROKEN = { code: 'broken', id: 1, text: 'The saved board t1.json could not be read: the file is not readable JSON. It was moved to broken/t1.1794890231662.json.' };
+const FRESH = { code: 'fresh_board', id: 2, text: 'No saved board could be loaded, so a fresh Board 1 was made.' };
+const HELD = { code: 'write_failed', id: 3, text: 'Could not save boards/t1.json: another program has it open.' };
+
+test('the not-saved line is drawn only when boards are not being saved, and takes no room otherwise', () => {
+  const model = stripModel(FRAME.tabs, FRAME.tab, FRAME.state);
+
+  const saved = renderStrip(model, { saving: true }).el;
+  assert.deepEqual(byClass(saved, 'b-note'), []);
+  assert.deepEqual(saved.children.map(n => n.className), ['b-tabs-list', 'tb-btn b-new']);
+
+  const unsaved = renderStrip(model, { saving: false }).el;
+  assert.deepEqual(byClass(unsaved, 'b-note').map(n => n.textContent), [NOT_SAVED_TEXT]);
+});
+
+test('the strip follows what the program says about saving', () => {
+  const plain = mounted();
+  assert.deepEqual(byClass(plain.host, 'b-note').map(n => n.textContent), [NOT_SAVED_TEXT], 'no data folder');
+  plain.pr.done();
+
+  const m = mounted();
+  m.page.ws.receive({ t: 'boards', ...SAVING });
+  assert.deepEqual(byClass(m.host, 'b-note'), []);
+  assert.deepEqual(m.page.remote.boards(), SAVING);
+
+  const second = { code: 'second_program', id: 1, text: 'Another Rukh (on port 62206) is using this data folder, so these boards are not being saved.' };
+  m.page.ws.receive({ t: 'boards', saving: false, notices: [second] });
+  assert.deepEqual(byClass(m.host, 'b-note').map(n => n.textContent), [NOT_SAVED_TEXT]);
+
+  m.pr.done();
+});
+
+test('a hello without the boards key counts as not saved', () => {
+  const st = createStore({ storage: null });
+  const remote = startRemoteSync({ store: st, actions: st.actions, location: { href: 'http://127.0.0.1:47480/' }, WebSocket: FakeSocket });
+  const ws = FakeSocket.last;
+
+  ws.onopen();
+  ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: 'view:1' });
+  assert.deepEqual(remote.boards(), { saving: false, notices: [] });
+
+  remote.stop();
+  st.dispose();
+});
+
+test('each notice is shown once, as the program words it, and not again on a reconnect', () => {
+  const page = lonePage({ saving: true, notices: [BROKEN, FRESH] });
+
+  assert.deepEqual(page.toasts, [{ text: BROKEN.text, kind: 'error' }, { text: FRESH.text, kind: 'info' }]);
+  assert.deepEqual(page.remote.boards(), { saving: true, notices: [BROKEN, FRESH] });
+
+  page.receive({ t: 'boards', saving: true, notices: [BROKEN, FRESH, HELD] });
+  assert.deepEqual(page.toasts.slice(2), [{ text: HELD.text, kind: 'error' }], 'only the new one');
+
+  page.reconnect({ saving: true, notices: [BROKEN, FRESH, HELD] });
+  assert.equal(page.toasts.length, 3, 'the same program start says nothing again');
+  assert.equal(page.remote.connected(), true);
+
+  page.reconnect({ saving: true, notices: [FRESH] }, 'i2');
+  assert.deepEqual(page.toasts.slice(3), [{ text: FRESH.text, kind: 'info' }], 'a restarted program numbers its notices again');
+
+  page.done();
+});
+
+test('a notice holding markup is shown as text', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const body = document.createElement('body');
+  document.body = body;
+  t.after(() => { delete document.body; });
+
+  const st = createStore({ storage: null });
+  const dialogs = createDialogs({ store: st, actions: st.actions });
+  const remote = startRemoteSync({ store: st, actions: st.actions, location: { href: 'http://127.0.0.1:47480/' }, WebSocket: FakeSocket });
+  const ws = FakeSocket.last;
+
+  const text = 'Board t3 («<b>Rook</b>: game 24») <img src=x onerror="alert(1)"> is a coach game.';
+  ws.onopen();
+  ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: 'view:1', boards: { saving: true, notices: [{ code: 'coach_game', id: 1, text }] } });
+
+  const shown = byClass(body, 'toast');
+  assert.equal(shown.length, 1);
+  assert.equal(shown[0].textContent, text);
+  assert.equal(shown[0].innerHTML, '');
+  assert.deepEqual(shown[0].childNodes.map(n => n.nodeType), [3], 'one text node, no elements');
+
+  remote.stop();
+  dialogs.dispose();
+  st.dispose();
+});

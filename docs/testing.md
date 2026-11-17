@@ -23,7 +23,7 @@ The engine tests in `uci.test.mjs` start the real Stockfish build from `web/vend
 | File | Covers |
 | --- | --- |
 | `board-mapping.test.mjs` | Square to world coordinates and back (`three/board.js`). |
-| `board-tabs.test.mjs` | The board strip (`ui/boardTabs.js`) on a small stand-in DOM. |
+| `board-tabs.test.mjs` | The board strip (`ui/boardTabs.js`) on a small stand-in DOM, the not-saved line and the program's notices about saved boards. |
 | `core-chess960.test.mjs` | Chess960 numbering and castling rights (`core/chess960.js`). |
 | `core-clock.test.mjs` | The chess clock arithmetic (`core/clock.js`). |
 | `core-game.test.mjs` | Rules, castling forms, the move tree, SAN and UCI (`core/game.js`). |

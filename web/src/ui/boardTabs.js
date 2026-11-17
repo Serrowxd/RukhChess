@@ -20,7 +20,7 @@ export function stripModel(tabs, selected, state) {
 }
 
 /** The strip's DOM for a model. */
-export function renderStrip(model, { editing = null, unreachable = false, handlers = {} } = {}) {
+export function renderStrip(model, { editing = null, unreachable = false, saving = false, handlers = {} } = {}) {
   const call = (name, ...args) => {
     if (typeof handlers[name] === 'function') handlers[name](...args);
   };
@@ -79,9 +79,10 @@ export function renderStrip(model, { editing = null, unreachable = false, handle
   }
 
   const add = el('button', { type: 'button', class: 'tb-btn b-new', title: 'New board', 'aria-label': 'New board', onclick: () => call('newTab') }, '+');
-  const note = el('span', { class: 'b-note', text: NOT_SAVED_TEXT });
+  const parts = [list, add];
+  if (!saving) parts.push(el('span', { class: 'b-note', text: NOT_SAVED_TEXT }));
 
-  const root = el('div', { class: unreachable ? 'b-tabs b-off' : 'b-tabs', hidden: !model.length }, list, add, note);
+  const root = el('div', { class: unreachable ? 'b-tabs b-off' : 'b-tabs', hidden: !model.length }, ...parts);
   root.inert = unreachable;
 
   return { el: root, list, items, buttons, input };
@@ -220,14 +221,16 @@ export function mountBoardTabs({ remote, ui, host, dialogs = ui && ui.dialogs, o
     const tabs = model();
     const unreachable = !!(remote.stopped && remote.stopped()) || !!(remote.connected && !remote.connected());
 
-    const key = JSON.stringify([tabs, editing, unreachable]);
+    const saving = typeof remote.boards === 'function' && remote.boards().saving === true;
+
+    const key = JSON.stringify([tabs, editing, unreachable, saving]);
     if (key === lastKey) return;
     lastKey = key;
 
     const keepFocus = focusAfter || focusedTab();
     focusAfter = null;
 
-    const next = renderStrip(tabs, { editing, unreachable, handlers });
+    const next = renderStrip(tabs, { editing, unreachable, saving, handlers });
 
     if (drawn) {
       next.list.scrollLeft = drawn.list.scrollLeft;

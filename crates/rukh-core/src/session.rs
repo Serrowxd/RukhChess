@@ -176,7 +176,8 @@ pub struct MatchState {
 }
 
 /// Study metadata. Empty until study editing exists.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Study {
     pub title: String,
     pub notes: String,

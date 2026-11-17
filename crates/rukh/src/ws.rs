@@ -9,6 +9,8 @@ use axum::extract::State;
 use axum::response::Response;
 use serde_json::{json, Value};
 
+use rukh_core::{Applied, Error};
+
 use crate::http::{AppState, PROTO};
 use crate::hub::{Frame, Hub};
 
@@ -94,7 +96,11 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
         return Some(refused(&id, "bad_input", NO_TAB.to_string()));
     }
 
-    Some(match hub.apply_desk(who, text, id.as_u64()) {
+    Some(answer(&id, hub.apply_desk(who, text, id.as_u64())))
+}
+
+fn answer(id: &Value, applied: Result<Applied, Error>) -> Ack {
+    match applied {
         Ok(applied) => Ack {
             json: json!({
                 "t": "ack", "id": id, "ok": true, "rev": applied.rev, "result": applied.result,
@@ -102,8 +108,32 @@ pub fn handle_text(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
             .to_string(),
             rev: Some(applied.rev),
         },
-        Err(e) => refused(&id, e.code(), e.to_string()),
-    })
+        Err(e) => refused(id, e.code(), e.to_string()),
+    }
+}
+
+/// The id of a `tab_reopen` intent, which the saver answers from `closed/`.
+fn reopen_id(text: &str) -> Option<Value> {
+    if text.len() > MAX_MESSAGE_BYTES {
+        return None;
+    }
+
+    let value: Value = serde_json::from_str(text).ok()?;
+    let is_reopen = value.get("t").and_then(Value::as_str) == Some("intent")
+        && value.get("op").and_then(Value::as_str) == Some("tab_reopen");
+
+    is_reopen.then(|| value.get("id").cloned().unwrap_or(Value::Null))
+}
+
+/// Answers one message from a page; `tab_reopen` goes to the saver when boards are saved.
+pub async fn handle_message(hub: &Hub, who: &str, text: &str) -> Option<Ack> {
+    if let Some(id) = reopen_id(text) {
+        if let Some(applied) = hub.reopen_closed(who, id.as_u64()).await {
+            return Some(answer(&id, applied));
+        }
+    }
+
+    handle_text(hub, who, text)
 }
 
 /// False means the socket is finished.
@@ -142,8 +172,13 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
     let mut frames = state.hub.subscribe();
     let mut presence = state.hub.presence().subscribe();
     let mut shutdown = state.shutdown.clone();
+    let mut boards = state.hub.status();
 
-    let hello = json!({"t": "hello", "proto": PROTO, "instance": state.hub.instance(), "you": who});
+    let status = boards.borrow_and_update().clone();
+    let hello = json!({
+        "t": "hello", "proto": PROTO, "instance": state.hub.instance(), "you": who,
+        "boards": {"saving": status.saving, "notices": status.notices},
+    });
     if !send_message(&mut socket, Message::Text(hello.to_string().into())).await {
         return;
     }
@@ -172,6 +207,16 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
                     break;
                 }
             }
+            changed = boards.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+
+                let message = boards.borrow_and_update().message();
+                if !send_message(&mut socket, Message::Text(message.into())).await {
+                    break;
+                }
+            }
             changed = frames.changed() => {
                 if changed.is_err() {
                     break;
@@ -193,7 +238,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
                     Some(Ok(_)) => continue,
                 };
 
-                let Some(ack) = handle_text(&state.hub, &who, text.as_str()) else {
+                let Some(ack) = handle_message(&state.hub, &who, text.as_str()).await else {
                     continue;
                 };
 

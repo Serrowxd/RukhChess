@@ -1,11 +1,13 @@
-//! Rukh: one chess game, shown by a 3D board in the browser and playable by any AI over MCP.
+//! Rukh: chess boards in tabs, shown by a 3D board in the browser and playable by any AI over MCP.
 
+mod boards;
 mod cli;
 mod http;
 mod hub;
 mod mcp;
 mod open;
 mod presence;
+mod safe;
 mod ws;
 
 #[cfg(test)]
@@ -18,9 +20,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::boards::Saver;
 use crate::cli::Command;
 use crate::http::AppState;
 use crate::hub::Hub;
@@ -33,21 +36,63 @@ pub struct Running {
     pub hub: Arc<Hub>,
     stop: watch::Sender<bool>,
     task: JoinHandle<std::io::Result<()>>,
+    saver: Option<JoinHandle<()>>,
+    lock: Option<safe::Lock>,
 }
 
 impl Running {
+    /// Stops serving, then writes what is waiting, all inside the grace period.
     pub async fn stop(self) {
         let _ = self.stop.send(true);
+        let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
 
         let task = self.task;
-        let _ = tokio::time::timeout(SHUTDOWN_GRACE, task).await;
+        let _ = tokio::time::timeout_at(deadline, task).await;
+
+        self.hub.finish_saving();
+        let saved = match self.saver {
+            Some(saver) => tokio::time::timeout_at(deadline, saver).await.is_ok(),
+            None => true,
+        };
+
+        // A saver still writing keeps the lock; the next start finds it stale and replaces it.
+        if let (true, Some(lock)) = (saved, self.lock) {
+            let _ = tokio::task::spawn_blocking(move || lock.release()).await;
+        }
     }
 }
 
-pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running> {
+/// `data_dir` None keeps the boards in memory only and writes nothing.
+pub async fn start(
+    listener: TcpListener,
+    web_dir: PathBuf,
+    data_dir: Option<PathBuf>,
+) -> std::io::Result<Running> {
     let port = listener.local_addr()?.port();
-    let hub = Arc::new(Hub::new(hub::new_instance_id()));
+    let instance = hub::new_instance_id();
     let (stop, stopped) = watch::channel(false);
+
+    let opened = boards::open(data_dir, port, &instance).await;
+
+    let (hub, saver, lock) = match opened.saving {
+        Some((folder, lock)) => {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let hub = Arc::new(Hub::with_desk(
+                instance,
+                opened.desk,
+                opened.status,
+                Some(tx),
+            ));
+
+            let saver = Saver::new(folder, hub.clone());
+            let task = tokio::spawn(saver.run(rx, stopped.clone()));
+            (hub, Some(task), Some(lock))
+        }
+        None => {
+            let hub = Arc::new(Hub::with_desk(instance, opened.desk, opened.status, None));
+            (hub, None, None)
+        }
+    };
 
     let state = Arc::new(AppState {
         hub: hub.clone(),
@@ -80,6 +125,8 @@ pub fn start(listener: TcpListener, web_dir: PathBuf) -> std::io::Result<Running
         hub,
         stop,
         task,
+        saver,
+        lock,
     })
 }
 
@@ -98,7 +145,13 @@ async fn run(options: cli::Options) -> ExitCode {
         }
     };
 
-    let running = match start(listener, web_dir.clone()) {
+    let data_dir = options
+        .data_dir
+        .clone()
+        .or_else(|| open::default_data_dir(&open::RealSystem, open::Os::current()))
+        .map(|dir| std::path::absolute(&dir).unwrap_or(dir));
+
+    let running = match start(listener, web_dir.clone(), data_dir.clone()).await {
         Ok(running) => running,
         Err(e) => {
             eprintln!("rukh: could not start the server: {e}");
@@ -109,8 +162,20 @@ async fn run(options: cli::Options) -> ExitCode {
     let link = format!("http://127.0.0.1:{}/", running.port);
     println!("Rukh is running. Board: {link}");
 
+    let status = running.hub.status().borrow().clone();
+    match (&data_dir, status.saving) {
+        (Some(dir), true) => println!("Boards are saved in {}", dir.join("boards").display()),
+        (None, _) => {
+            println!("Boards are not being saved: no data folder was found (pass --data-dir).")
+        }
+        (Some(_), false) if status.notices.is_empty() => println!("Boards are not being saved."),
+        (Some(_), false) => {}
+    }
+    for notice in &status.notices {
+        println!("{}", ascii(&notice.text));
+    }
+
     let mode = options.open;
-    let data_dir = options.data_dir.clone();
     let target = link.clone();
     let opened = tokio::task::spawn_blocking(move || {
         open::open_board(
@@ -151,6 +216,17 @@ async fn run(options: cli::Options) -> ExitCode {
     println!("Stopping.");
     running.stop().await;
     ExitCode::SUCCESS
+}
+
+/// The console may not show other characters.
+fn ascii(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{ab}' | '\u{bb}' => '"',
+            c if c.is_ascii() => c,
+            _ => '?',
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {

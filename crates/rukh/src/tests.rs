@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::hub::Hub;
 use crate::{start, Running};
 
+mod saving;
 mod tabs;
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -30,7 +31,9 @@ async fn serve(web: &str) -> Running {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind a test port");
-    start(listener, testdata(web)).expect("start the test server")
+    start(listener, testdata(web), None)
+        .await
+        .expect("start the test server")
 }
 
 /// One HTTP/1.1 request written by hand, so the test controls the exact path and Host header.

@@ -134,7 +134,7 @@ Tab ids are written `t1`, `t2` and so on. They are handed out in order and never
 
 A tab is `free`, `game` or `reps`. The person makes free tabs; the program makes the other two for the coach. A new desk has one free tab, `t1` "Board 1", on the standard position.
 
-The tab intents are `tab_select`, `tab_new` (with an optional `name` and `copy_of`), `tab_rename`, `tab_close` and `tab_move`. They come from views and from the program; an AI is refused. `tab_new` selects the tab it makes. A copy takes the other tab's game and study but not its match. `tab_reopen` is refused with `nothing_closed`: closed tabs are not stored. `tab_close` accepts `abandon` and ignores it. `tab_move` refuses a `to` outside the list with `bad_input`. A rename to the same name, or a select of the tab already shown, changes nothing and leaves `rev` alone.
+The tab intents are `tab_select`, `tab_new` (with an optional `name` and `copy_of`), `tab_rename`, `tab_close` and `tab_move`. They come from views and from the program; an AI is refused. `tab_new` selects the tab it makes. A copy takes the other tab's game and study but not its match. The desk itself refuses `tab_reopen` with `nothing_closed`, because it holds no closed tabs; a program that keeps them reopens one with `Desk::reopen`. `tab_close` accepts `abandon` and ignores it. `tab_move` refuses a `to` outside the list with `bad_input`. A rename to the same name, or a select of the tab already shown, changes nothing and leaves `rev` alone.
 
 A game intent may name its tab with `tab`. With no `tab` it lands on the selected tab. A tab that is not open is refused with `unknown_tab`; the message quotes at most 20 characters of what was sent. An intent that has the key `tab` twice is refused with `bad_input`. An intent for a tab that is not shown is still applied.
 
@@ -157,3 +157,64 @@ The desk's frame is the selected tab's frame with two more keys, `tab`, the sele
 A mark is computed from the tab's table, never stored. It is `your_move` when a match there waits for a person, `waiting` when an AI or the engine is to move, `over` when the game at the match tip has ended, and `null` with no match. `paused` is kept for a paused coach game; no code produces it.
 
 A change on a tab that is not shown still raises `rev`, so the next frame carries the shown tab again with fresh marks. The frame's hint names the last change, on whichever tab it landed.
+
+## Saved forms
+
+The crate turns a game, a table, a tab and the list of tabs into text and back. It writes no files: the program does all disk work.
+
+### What is saved
+
+`Game::to_saved` keeps only what cannot be recomputed: the variant, the Chess960 number, the start FEN, the node shown, the annotations on the start position, and each move with its id, the node it was played from, its UCI, its SAN and its annotations. `Game::from_saved` rebuilds the game through the rules. It plays each move in ascending id from its `from` node. A move that is illegal, a `from` that does not exist, an id that repeats or does not come out as written, a UCI written in another form, or a SAN that differs from the replay refuses the whole file with a `Damaged` message that names the move. Nothing is half-built. Node ids after a round trip are the same, because ids are handed out in order and no intent deletes a node.
+
+`Table::to_saved` adds `game_id`, `board_rev`, the match (active, seats, tip, style), the study and the person's Stop. `Table::from_saved` recomputes the status at the tip. A restored table gives the same state as the one saved, except for `recent`, the bump log, the seat-moved marker, the hint and `rev`, which are not saved. Its `rev` starts at 0.
+
+A free tab is saved in full. A `game` tab and the Reps tab are saved as stubs with no position. A Reps stub loads as an empty Reps tab. A game stub reads, but `Desk::restore` leaves it out; its id still counts.
+
+### The text
+
+A tab file is one JSON object. The header is printed over a few lines and each move is one line. The writer is written by hand; the reader uses `serde_json`. Every file has `"v": 1`, and any other version is refused. A byte-order mark before the text is ignored, so a file saved by an editor that adds one still reads. Every file ends in a newline.
+
+Fields the reader does not know are kept and written back: at the top level of a tab file, inside `match`, `study` and `root`, in each move and in the index. Unknown fields of a move and of `root` are dropped when a new game replaces the moves. Unknown fields inside an evaluation, an arrow or a highlight are not kept, because those are the core's own shapes. A number too large for 64 bits is read as a float and written back as one.
+
+`stopped` is written only when the person's Stop holds, as `match_stop`, `new_game` or `seats`. `root` holds the start position's annotations and is written only when there are some. `match` and `study` may be left out of a file; they then take their defaults.
+
+The reader refuses numbers a desk could not carry on with:
+
+- A board id above `t999999999`, in a file, a file name or the index.
+- A `next_tab` above 1000000000.
+- A `game_id`, `board_rev` or `next_game_id` above 2^50. The counters can grow far past that and still be exact in JavaScript, which loses exactness at 2^53.
+- A Chess960 number that is not the number of the start position. With no number in the file, the one computed from the start position is used.
+
+A move number in a FEN too large to count plies stops counting at the largest number rather than overflowing.
+
+The index holds the order, the selected tab, `next_tab` and `next_game_id`, on one line.
+
+### Rebuilding a desk
+
+`Desk::restore` takes the index and the tabs that loaded. Tabs come in the index's order. Tabs it does not name follow by ascending id, and ids it names that did not load are skipped. A selected tab that is missing falls back to the first. `next_tab` is raised above every loaded id, and `SavedIndex::note_seen` raises it above any other id the program has seen, such as a file in `closed/`. `next_game_id` is raised above every loaded `game_id`. A stub, a tab whose `game_id` another tab already holds, and a reopened tab take a fresh one. With nothing loaded the desk starts with one fresh "Board 1" under the next id, so it is never empty. When every board number has been used, that one board takes `t999999999` again rather than leave the desk empty. A restored desk takes the program's new instance id.
+
+Some choices are left to the restore:
+
+- Every free tab that loads is kept, even above the limit of 12. New tabs are then refused until enough are closed.
+- A second tab with the same id is dropped. The program never passes one, because a file's name must match the id inside it.
+- A name is cleaned and cut to 40 characters, and the next save writes the cleaned name.
+- Two Reps stubs both load. Keeping only one is left to the coach.
+- The seat-moved marker is not restored.
+
+When the board numbers run out, `tab_new`, and `tab_close` of the last tab, are refused with `tab_limit`, "No new board can be made: the board numbers have run out." An id is never handed out twice.
+
+`Desk::reopen` puts a closed free tab back under its old id, at the end of the order, selected, with a fresh `game_id`. It is refused for an AI, for an id that is open, for a game or Reps tab ("Board t2 is not a free board, so it cannot be reopened."), and at the free-tab limit. Its refusal for an open id reads "Board t1 is already open."; the program never reaches it, because it skips open ids.
+
+`Desk::stop_saving` turns recording off for a restored desk the program cannot save after all. `Desk::mark_to_write` asks for a tab to be written at the next save; the program uses it for a tab loaded from a newer pending copy.
+
+### What to write
+
+Only a desk made by `Desk::restore` records changes. `Desk::take_unsaved` hands over what changed since the last call:
+
+- `now`: tabs to write at once, after a move, a new game, a match or seat change, a change to the person's Stop, a new tab or a rename.
+- `quiet`: tabs to write after a quiet moment, after a note, an evaluation or navigation. The desk tells these apart by the change's reason (`annotate`, `eval`, `navigate`); any other reason is written at once, which loses nothing.
+- `index`: the order, the selection or the counters changed.
+- `closed`: the saved form of each free tab closed since the last call.
+- `removed`: tabs whose file leaves `boards/`.
+
+`Desk::saved_tab` and `Desk::saved_index` give the saved forms to write.

@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rukh_core::{Applied, Desk, Error, Seat, Side, TabId, TabKind, Table};
-use tokio::sync::watch;
+use rukh_core::{Applied, Desk, Error, Seat, Side, Tab, TabId, TabKind, Table, NOTHING_CLOSED};
+use tokio::sync::{oneshot, watch};
 
+use crate::boards::{SaverSender, Status, ToSaver};
 use crate::presence::Presence;
 
 /// Why [`Hub::apply_seated`] changed nothing.
@@ -31,6 +32,12 @@ pub struct Hub {
     instance: String,
     presence: Arc<Presence>,
     sessions: AtomicU64,
+    saver: Option<SaverSender>,
+    status: watch::Sender<Status>,
+    #[cfg(test)]
+    writes: AtomicU64,
+    #[cfg(test)]
+    writes_while_locked: AtomicU64,
 }
 
 /// Milliseconds since the Unix epoch, as frames carry it.
@@ -81,14 +88,30 @@ fn owed_seat(table: &Table) -> Option<Side> {
 }
 
 impl Hub {
+    /// One board in memory, not saved.
     pub fn new(instance: String) -> Hub {
         let desk = Desk::new(&instance);
+        Hub::with_desk(instance, desk, Status::default(), None)
+    }
+
+    /// A restored or fresh desk; with a saver, every change is handed to it.
+    pub fn with_desk(
+        instance: String,
+        mut desk: Desk,
+        status: Status,
+        saver: Option<SaverSender>,
+    ) -> Hub {
         let first = Frame {
             rev: desk.rev(),
             json: desk.frame(now_ms()),
         };
 
         let (tx, _rx) = watch::channel(Arc::new(first));
+        let (status, _) = watch::channel(status);
+
+        if let Some(saver) = &saver {
+            let _ = saver.send(ToSaver::Changed(desk.take_unsaved()));
+        }
 
         Hub {
             inner: Mutex::new(desk),
@@ -96,6 +119,12 @@ impl Hub {
             instance,
             presence: Presence::new(),
             sessions: AtomicU64::new(0),
+            saver,
+            status,
+            #[cfg(test)]
+            writes: AtomicU64::new(0),
+            #[cfg(test)]
+            writes_while_locked: AtomicU64::new(0),
         }
     }
 
@@ -105,6 +134,97 @@ impl Hub {
 
     pub fn presence(&self) -> &Arc<Presence> {
         &self.presence
+    }
+
+    /// Whether boards are saved, and the notices about them.
+    pub fn status(&self) -> watch::Receiver<Status> {
+        self.status.subscribe()
+    }
+
+    pub fn add_notice(&self, code: &'static str, text: String) {
+        self.status.send_modify(|status| status.add(code, text));
+    }
+
+    /// True when this program writes the boards to its data folder.
+    pub fn saves(&self) -> bool {
+        self.saver.is_some()
+    }
+
+    /// Called before each file write; the tests count writes made while the desk lock is held.
+    #[cfg(not(test))]
+    pub fn note_write(&self) {}
+
+    #[cfg(test)]
+    pub fn note_write(&self) {
+        self.writes.fetch_add(1, Ordering::Relaxed);
+
+        if matches!(
+            self.inner.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            self.writes_while_locked.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `(file writes, of which while the desk lock was held)`.
+    #[cfg(test)]
+    pub fn write_counts(&self) -> (u64, u64) {
+        (
+            self.writes.load(Ordering::Relaxed),
+            self.writes_while_locked.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Hands what changed to the saver. Never waits: the channel is unbounded.
+    fn hand_over(&self, desk: &mut Desk) {
+        let Some(saver) = &self.saver else {
+            return;
+        };
+
+        let unsaved = desk.take_unsaved();
+        if !unsaved.is_empty() {
+            let _ = saver.send(ToSaver::Changed(unsaved));
+        }
+    }
+
+    /// Asks the saver to reopen the newest closed board; `None` when nothing is saved.
+    pub async fn reopen_closed(
+        &self,
+        by: &str,
+        intent_id: Option<u64>,
+    ) -> Option<Result<Applied, Error>> {
+        let saver = self.saver.as_ref()?;
+        let (reply, answer) = oneshot::channel();
+
+        let asked = saver.send(ToSaver::Reopen {
+            by: by.to_string(),
+            intent_id,
+            reply,
+        });
+        let nothing = || Err(Error::NothingClosed(NOTHING_CLOSED.into()));
+        if asked.is_err() {
+            return Some(nothing());
+        }
+
+        Some(answer.await.unwrap_or_else(|_| nothing()))
+    }
+
+    /// Puts a closed tab back; the saver calls it after reading the file.
+    pub fn reopen(&self, tab: Tab, by: &str, intent_id: Option<u64>) -> Result<Applied, Error> {
+        let mut desk = self.lock();
+        let applied = desk.reopen(tab, by, now_ms(), intent_id);
+        self.hand_over(&mut desk);
+
+        let applied = applied?;
+        self.publish(&desk, &applied);
+        Ok(applied)
+    }
+
+    /// Tells the saver to write what is waiting and stop.
+    pub fn finish_saving(&self) {
+        if let Some(saver) = &self.saver {
+            let _ = saver.send(ToSaver::Finish);
+        }
     }
 
     /// Frames of the shown tab; a change on any tab sends one.
@@ -159,8 +279,10 @@ impl Hub {
     ) -> Result<Applied, Error> {
         let mut desk = self.lock();
         let tab = desk.selected();
-        let applied = desk.apply_on(tab, by, intent_json, now_ms(), intent_id)?;
+        let applied = desk.apply_on(tab, by, intent_json, now_ms(), intent_id);
+        self.hand_over(&mut desk);
 
+        let applied = applied?;
         self.publish(&desk, &applied);
         Ok(applied)
     }
@@ -174,8 +296,10 @@ impl Hub {
         intent_id: Option<u64>,
     ) -> Result<Applied, Error> {
         let mut desk = self.lock();
-        let applied = desk.apply_on(tab, by, intent_json, now_ms(), intent_id)?;
+        let applied = desk.apply_on(tab, by, intent_json, now_ms(), intent_id);
+        self.hand_over(&mut desk);
 
+        let applied = applied?;
         self.publish(&desk, &applied);
         Ok(applied)
     }
@@ -188,8 +312,10 @@ impl Hub {
         intent_id: Option<u64>,
     ) -> Result<Applied, Error> {
         let mut desk = self.lock();
-        let applied = desk.apply_with_id(by, intent_json, now_ms(), intent_id)?;
+        let applied = desk.apply_with_id(by, intent_json, now_ms(), intent_id);
+        self.hand_over(&mut desk);
 
+        let applied = applied?;
         self.publish(&desk, &applied);
         Ok(applied)
     }
@@ -209,9 +335,10 @@ impl Hub {
             return Err(Refused::Elsewhere(other));
         }
 
-        let applied = desk
-            .apply_on(tab, by, intent_json, now_ms(), None)
-            .map_err(Refused::Core)?;
+        let applied = desk.apply_on(tab, by, intent_json, now_ms(), None);
+        self.hand_over(&mut desk);
+
+        let applied = applied.map_err(Refused::Core)?;
         self.publish(&desk, &applied);
 
         if let Some(table) = desk.table(tab) {

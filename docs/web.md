@@ -178,7 +178,8 @@ It is active only when `GET api/hello` answers as Rukh. On `file://` nothing is 
 Server to page:
 
 ```
-{"t":"hello","proto":2,"instance":"..","you":"view:3"}
+{"t":"hello","proto":2,"instance":"..","you":"view:3","boards":{"saving":true,"notices":[{"code","id","text"}]}}
+{"t":"boards","saving":true,"notices":[..]}
 {"t":"state","instance":"..","rev":7,"hint":{..},"tab":"t2",
   "tabs":[{"id":"t1","name":"Board 1","kind":"free","mark":null},{"id":"t2",..}],
   "state":{"game_id","board_rev","recent",
@@ -233,6 +234,7 @@ The program holds several games as tabs and one board shows the selected one. Th
 - A `stale` refusal is kept quiet only when it is for the shown tab and the page already shows that tab's game.
 - The AI chip counts an AI's seat only on the tab the presence message gives for it; on other tabs that AI is only connected.
 - The tab intents are `tab_select`, `tab_new`, `tab_rename` and `tab_close`. They name their own tab and do not hold back frames. Their refusals are shown like any other, except the board limit, which shows "Close a board first."
+- `boards` says whether the program saves boards, and its `boards` message gives the whole list again when a notice is added later. A hello without it counts as not saved. Each notice is shown once per page load as a toast, in the program's words; a notice is known by the program's instance and its id, so a reconnect to the same program shows nothing again.
 - The program always sends `tab`. A frame without it reads as one unnamed board whose intents carry no tab; only the older shell tests send such frames.
 
 ### The echo guard

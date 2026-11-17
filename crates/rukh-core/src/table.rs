@@ -1,11 +1,12 @@
 //! The table: a [`Session`] plus its counters, where intents are applied and frames produced.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::intent::{AnnotateMode, Intent};
+use crate::saved::{Damaged, Extra, InnerExtra, SavedMatch, SavedTable, Stopped};
 use crate::session::{MatchState, Seat, Seats, Session, Side, Study, Style, StyleInfo};
 use crate::{
     Arrow, Error, Eval, Game, Highlight, Node, NodeId, Snapshot, Status, DRAW_COLORS, NAG_GLYPHS,
@@ -323,6 +324,15 @@ pub struct Table {
     tip_status: Option<Status>,
     instance: String,
     hint: Hint,
+    extra: SavedExtra,
+}
+
+/// Unknown fields read from a tab file, kept so a save writes them back.
+#[derive(Debug, Clone, Default)]
+struct SavedExtra {
+    header: Extra,
+    inner: InnerExtra,
+    moves: BTreeMap<NodeId, Extra>,
 }
 
 impl Default for Table {
@@ -786,10 +796,95 @@ impl Table {
                 by: "rukh".to_string(),
                 intent_id: None,
             },
+            extra: SavedExtra::default(),
         };
 
         table.refresh_tip_status();
         table
+    }
+
+    /// The saved form: what cannot be recomputed, without `rev`, `recent` or the hint.
+    pub fn to_saved(&self) -> SavedTable {
+        let mut game = self.session.game.to_saved();
+
+        for m in &mut game.moves {
+            if let Some(extra) = self.extra.moves.get(&m.id) {
+                m.extra.clone_from(extra);
+            }
+        }
+
+        let play = &self.session.play;
+
+        SavedTable {
+            game_id: self.game_id,
+            board_rev: self.board_rev,
+            game,
+            play: SavedMatch {
+                active: play.active,
+                seats: play.seats,
+                tip: play.tip,
+                style: play.style,
+            },
+            study: self.session.study.clone(),
+            stopped: self.stopped_by_person.and_then(Stopped::from_name),
+            extra: self.extra.header.clone(),
+            inner_extra: self.extra.inner.clone(),
+        }
+    }
+
+    /// Rebuilds the game through the rules and recomputes the status at the tip.
+    pub fn from_saved(instance: &str, saved: &SavedTable) -> Result<Table, Damaged> {
+        let game = Game::from_saved(&saved.game)?;
+
+        let tip = saved.play.tip;
+        if game.node(tip).is_none() {
+            return Err(Damaged(format!(
+                "the match tip is node {tip}, which is not in the game"
+            )));
+        }
+
+        let session = Session {
+            game,
+            study: saved.study.clone(),
+            play: MatchState {
+                active: saved.play.active,
+                seats: saved.play.seats,
+                tip,
+                style: saved.play.style,
+            },
+        };
+
+        let mut table = Table::with_session(instance, session);
+        table.board_rev = saved.board_rev;
+        table.set_game_id(saved.game_id);
+        table.stopped_by_person = saved.stopped.map(Stopped::name);
+
+        table.extra = SavedExtra {
+            header: saved.extra.clone(),
+            inner: saved.inner_extra.clone(),
+            moves: saved
+                .game
+                .moves
+                .iter()
+                .filter(|m| !m.extra.is_empty())
+                .map(|m| (m.id, m.extra.clone()))
+                .collect(),
+        };
+
+        Ok(table)
+    }
+
+    /// `match_stop`, `new_game` or `seats` while the person's Stop holds.
+    pub fn stopped_by_person(&self) -> Option<&'static str> {
+        self.stopped_by_person
+    }
+
+    pub(crate) fn saved_header_extra(&self) -> &Extra {
+        &self.extra.header
+    }
+
+    pub(crate) fn keep_header_extra(&mut self, header: Extra) {
+        self.extra.header = header;
     }
 
     fn refresh_tip_status(&mut self) {
@@ -843,7 +938,7 @@ impl Table {
 
     pub(crate) fn set_game_id(&mut self, game_id: u64) {
         self.game_id = game_id;
-        self.next_game_id = self.next_game_id.max(game_id + 1);
+        self.next_game_id = self.next_game_id.max(game_id.saturating_add(1));
     }
 
     /// The `game_id` the next new game takes.
@@ -1353,7 +1448,7 @@ impl Table {
             self.rev += 1;
 
             if pending.bump_board {
-                self.board_rev += 1;
+                self.board_rev = self.board_rev.saturating_add(1);
                 self.bumps.push_back((self.board_rev, by.to_string()));
 
                 while self.bumps.len() > BUMP_LOG_MAX {
@@ -1630,10 +1725,12 @@ impl Table {
         };
 
         self.session.game = game;
+        self.extra.moves.clear();
+        self.extra.inner.root.clear();
         self.session.play.active = false;
         self.session.play.tip = 0;
         self.game_id = self.next_game_id;
-        self.next_game_id += 1;
+        self.next_game_id = self.next_game_id.saturating_add(1);
 
         let g = &self.session.game;
         let result = json!({
