@@ -44,11 +44,13 @@ pub struct Notice {
     pub text: String,
 }
 
-/// Whether boards are saved, and the notices so far; sent in the hello and on every change.
+/// Whether boards are saved, the notices and the closed count; sent in the hello and on every change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Status {
     pub saving: bool,
     pub notices: Vec<Notice>,
+    /// Boards `tab_reopen` can bring back: closed files whose id is not open.
+    pub closed: usize,
 }
 
 impl Status {
@@ -56,6 +58,7 @@ impl Status {
         let mut status = Status {
             saving,
             notices: Vec::new(),
+            closed: 0,
         };
 
         for (code, text) in notices {
@@ -72,9 +75,16 @@ impl Status {
         self.notices.drain(..over);
     }
 
+    /// The hello's `boards` object.
+    pub fn boards(&self) -> serde_json::Value {
+        json!({"saving": self.saving, "notices": self.notices, "closed": self.closed})
+    }
+
     /// The `{"t":"boards",...}` message.
     pub fn message(&self) -> String {
-        json!({"t": "boards", "saving": self.saving, "notices": self.notices}).to_string()
+        let mut message = self.boards();
+        message["t"] = json!("boards");
+        message.to_string()
     }
 }
 
@@ -206,9 +216,12 @@ pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> O
         };
     }
 
+    let mut status = Status::new(true, restored.notices);
+    status.closed = restored.closed;
+
     Opened {
         desk,
-        status: Status::new(true, restored.notices),
+        status,
         saving: Some((folder, lock)),
     }
 }
@@ -398,6 +411,8 @@ pub struct Restored {
     pub notices: Vec<(&'static str, String)>,
     /// False when part of the folder cannot be used; the desk then lives in memory.
     pub saving: bool,
+    /// Closed boards that can be reopened.
+    pub closed: usize,
 }
 
 /// One restore, with the notices it gathers and whether files may still be moved and written.
@@ -689,6 +704,8 @@ pub fn restore(folder: &Folder, instance: &str, now_ms: u64) -> io::Result<Resto
         ));
     }
 
+    let closed = closed_ids(folder).difference(&loaded).count();
+
     let mut desk = Desk::restore(instance, &index, tabs);
     for id in from_pending {
         desk.mark_to_write(id);
@@ -698,6 +715,7 @@ pub fn restore(folder: &Folder, instance: &str, now_ms: u64) -> io::Result<Resto
         desk,
         notices,
         saving,
+        closed,
     })
 }
 
@@ -837,6 +855,8 @@ struct PassResult {
     removed_left: Vec<TabId>,
     reopened_left: Vec<(TabId, PathBuf)>,
     failures: Vec<(String, String)>,
+    /// What `closed/` holds after a pass that wrote or removed there.
+    closed_now: Option<BTreeSet<TabId>>,
 }
 
 fn closed_ms(name: &str) -> Option<u64> {
@@ -857,6 +877,14 @@ fn closed_files(folder: &Folder) -> Vec<(u64, String)> {
 
     files.sort_by(|a, b| b.cmp(a));
     files
+}
+
+/// The ids of the boards in `closed/`, each once.
+fn closed_ids(folder: &Folder) -> BTreeSet<TabId> {
+    closed_files(folder)
+        .iter()
+        .filter_map(|(_, name)| tab_id_in_file_name(name))
+        .collect()
 }
 
 fn trim_closed(folder: &Folder) {
@@ -936,6 +964,8 @@ fn run_pass(folder: &Folder, hub: &Hub, pass: Pass) -> PassResult {
         return result;
     }
 
+    let touches_closed = !pass.closed.is_empty() || !pass.removed.is_empty();
+
     let mut kept_away = BTreeSet::new();
     for tab in pass.closed {
         let shown = format!("boards/closed/{}.json", tab.id);
@@ -976,6 +1006,10 @@ fn run_pass(folder: &Folder, hub: &Hub, pass: Pass) -> PassResult {
             }
             !gone
         });
+    }
+
+    if touches_closed {
+        result.closed_now = Some(closed_ids(folder));
     }
 
     result
@@ -1145,6 +1179,19 @@ impl Saver {
         self.pending.reopened.extend(result.reopened_left);
 
         self.report(&result.saved, &result.failures);
+
+        if let Some(ids) = result.closed_now {
+            self.tell_closed(&ids);
+        }
+    }
+
+    /// Sends the count of closed boards whose id is not open; the files were listed with no lock held.
+    fn tell_closed(&self, ids: &BTreeSet<TabId>) {
+        let waiting = self
+            .hub
+            .read_desk(|desk| ids.iter().filter(|id| desk.tab(**id).is_none()).count());
+
+        self.hub.set_closed(waiting);
     }
 
     fn report(&mut self, saved: &[String], failures: &[(String, String)]) {
@@ -1169,23 +1216,28 @@ impl Saver {
         let found = tokio::task::spawn_blocking(move || {
             let mut notices = Vec::new();
             let found = newest_closed(&folder, &open, &mut notices);
-            (found, notices)
+            (found, notices, closed_ids(&folder))
         })
         .await;
 
-        let (found, notices) = found.unwrap_or((None, Vec::new()));
+        let (found, notices, ids) = found.unwrap_or((None, Vec::new(), BTreeSet::new()));
         for (code, text) in notices {
             self.hub.add_notice(code, text);
         }
 
         let Some((tab, path)) = found else {
+            self.tell_closed(&ids);
             return Err(Error::NothingClosed(NOTHING_CLOSED.into()));
         };
 
         let id = tab.id();
-        let applied = self.hub.reopen(tab, by, intent_id)?;
-        self.pending.reopened.push((id, path));
-        Ok(applied)
+        let applied = self.hub.reopen(tab, by, intent_id);
+        if applied.is_ok() {
+            self.pending.reopened.push((id, path));
+        }
+
+        self.tell_closed(&ids);
+        applied
     }
 }
 

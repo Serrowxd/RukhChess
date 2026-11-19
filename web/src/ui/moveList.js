@@ -16,6 +16,7 @@ export function createMoveList({ store, actions, dialogs }) {
   );
 
   const root = el('div', {}, nav, list);
+  let switched = false; // the next update shows another board
 
   list.addEventListener('click', e => {
     const mv = e.target.closest('.mv[data-id]');
@@ -244,12 +245,25 @@ export function createMoveList({ store, actions, dialogs }) {
     else if (cur && cur.children.length > 1) varHint.textContent = `${cur.children.length} continuations`;
     else varHint.textContent = '';
 
+    // Another board's moves start from the top of the list.
+    if (switched) {
+      switched = false;
+      const scroller = root.closest('.p-body');
+      if (scroller) scroller.scrollTop = 0;
+    }
+
     const curEl = list.querySelector('.mv.current');
     if (curEl && curEl.scrollIntoView) curEl.scrollIntoView({ block: 'nearest' });
   }
 
   return {
     el: root, update,
+
+    /** The page is about to show another board. */
+    leave() {
+      switched = true;
+    },
+
     dispose() {
       clearTimeout(pressTimer);
       root.remove();

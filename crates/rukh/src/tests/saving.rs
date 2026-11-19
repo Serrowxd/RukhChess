@@ -654,7 +654,7 @@ async fn nothing_that_loads_gives_one_fresh_board_and_the_hello_says_so() {
                 "The saved board t1.json could not be read: {why}. It was moved to broken/{moved}."
             )},
             {"id": 2, "code": "fresh_board", "text": "No saved board could be loaded, so a fresh Board 1 was made."},
-        ]})
+        ], "closed": 0})
     );
 
     let frame: Value = serde_json::from_str(&server.hub.latest().json).expect("frame");
@@ -842,7 +842,10 @@ async fn no_data_folder_writes_nothing() {
     let hub = server.hub.clone();
 
     let (mut socket, hello) = view(server.port).await;
-    assert_eq!(hello["boards"], json!({"saving": false, "notices": []}));
+    assert_eq!(
+        hello["boards"],
+        json!({"saving": false, "notices": [], "closed": 0})
+    );
 
     intent(&mut socket, 1, json!({"op": "play", "move": "e4"})).await;
     intent(
@@ -957,6 +960,196 @@ async fn the_twenty_first_closed_file_removes_the_oldest() {
     assert_eq!(names.iter().filter(|n| n.starts_with("t120.")).count(), 1);
 
     server.stop().await;
+}
+
+/// A closed board file for `id`, readable by `tab_reopen`.
+fn closed_board(id: &str) -> String {
+    FRESH_T1.replace("\"t1\"", &format!("\"{id}\""))
+}
+
+/// Reads until the ack with `id` and a boards message with `closed`, in either order.
+async fn ack_and_count(socket: &mut Socket, id: u64, closed: usize) -> (Value, Value) {
+    let mut ack = None;
+    let mut boards = None;
+
+    while ack.is_none() || boards.is_none() {
+        let message = next_any(socket).await;
+
+        if message["t"] == "ack" && message["id"] == id {
+            ack = Some(message);
+        } else if message["t"] == "boards" && message["closed"] == closed {
+            boards = Some(message);
+        }
+    }
+
+    (ack.expect("the ack"), boards.expect("the boards message"))
+}
+
+/// Reads until a boards message with `closed`.
+async fn count_of(socket: &mut Socket, closed: usize) -> Value {
+    loop {
+        let message = next_any(socket).await;
+        if message["t"] == "boards" && message["closed"] == closed {
+            return message;
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_hello_counts_the_closed_boards_found_at_start() {
+    let folder = TempFolder::new("closed-count");
+    folder.put("closed/t7.1000.json", &closed_board("t7"));
+    folder.put("closed/t7.3000.json", &closed_board("t7"));
+    folder.put("closed/t8.2000.json", &closed_board("t8"));
+    folder.put("closed/notes.txt", "not a board");
+
+    let server = serve_in(&folder.path).await;
+    let (_socket, hello) = view(server.port).await;
+
+    assert_eq!(
+        hello["boards"],
+        json!({"saving": true, "notices": [], "closed": 2})
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn the_closed_count_rises_on_close_and_falls_on_reopen_in_every_view() {
+    let folder = TempFolder::new("closed-views");
+    let server = serve_in(&folder.path).await;
+    let (mut page, hello) = view(server.port).await;
+    let (mut other, other_hello) = view(server.port).await;
+
+    assert_eq!(hello["boards"]["closed"], 0);
+    assert_eq!(other_hello["boards"]["closed"], 0);
+
+    intent(&mut page, 1, json!({"op": "play", "move": "e4"})).await;
+    intent(&mut page, 2, json!({"op": "tab_new"})).await;
+
+    send(
+        &mut page,
+        json!({"t": "intent", "id": 3, "op": "tab_close", "tab": "t1"}),
+    )
+    .await;
+    let (ack, boards) = ack_and_count(&mut page, 3, 1).await;
+
+    let rose = json!({"t": "boards", "saving": true, "notices": [], "closed": 1});
+    assert_eq!(ack["result"], json!({"closed": "t1", "selected": "t2"}));
+    assert_eq!(boards, rose);
+    assert_eq!(count_of(&mut other, 1).await, rose);
+    assert_eq!(folder.names("closed").len(), 1);
+
+    send(
+        &mut page,
+        json!({"t": "intent", "id": 4, "op": "tab_reopen"}),
+    )
+    .await;
+    let (ack, boards) = ack_and_count(&mut page, 4, 0).await;
+
+    let fell = json!({"t": "boards", "saving": true, "notices": [], "closed": 0});
+    assert_eq!(ack["result"], json!({"tab": "t1", "selected": "t1"}));
+    assert_eq!(boards, fell);
+    assert_eq!(count_of(&mut other, 0).await, fell);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn the_closed_count_stays_zero_with_no_data_folder() {
+    let server = serve("web").await;
+    let (mut socket, hello) = view(server.port).await;
+    assert_eq!(hello["boards"]["closed"], 0);
+
+    intent(&mut socket, 1, json!({"op": "play", "move": "e4"})).await;
+    intent(&mut socket, 2, json!({"op": "tab_new"})).await;
+    intent(&mut socket, 3, json!({"op": "tab_close", "tab": "t1"})).await;
+
+    send(
+        &mut socket,
+        json!({"t": "intent", "id": 4, "op": "tab_reopen"}),
+    )
+    .await;
+    loop {
+        let message = next_any(&mut socket).await;
+        assert_ne!(message["t"], "boards", "{message}");
+
+        if message["t"] == "ack" && message["id"] == 4 {
+            assert_eq!(message["error"]["code"], "nothing_closed", "{message}");
+            break;
+        }
+    }
+
+    assert_eq!(server.hub.status().borrow().closed, 0);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn the_closed_count_stays_at_twenty_when_the_oldest_is_dropped() {
+    let folder = TempFolder::new("closed-twenty");
+    for i in 0..KEEP_CLOSED {
+        let id = format!("t{}", 100 + i);
+        folder.put(
+            &format!("closed/{id}.{}.json", 1000 + i),
+            &closed_board(&id),
+        );
+    }
+
+    let server = serve_in(&folder.path).await;
+    let (mut socket, hello) = view(server.port).await;
+    assert_eq!(hello["boards"]["closed"], KEEP_CLOSED);
+
+    intent(
+        &mut socket,
+        1,
+        json!({"op": "play", "move": "e4", "tab": "t120"}),
+    )
+    .await;
+    intent(&mut socket, 2, json!({"op": "tab_close", "tab": "t120"})).await;
+
+    until("the oldest removed", || {
+        !folder.exists("closed/t100.1000.json")
+    })
+    .await;
+    settle(&server.hub).await;
+    assert_eq!(folder.names("closed").len(), KEEP_CLOSED);
+    assert_eq!(server.hub.status().borrow().closed, KEEP_CLOSED);
+
+    send(
+        &mut socket,
+        json!({"t": "intent", "id": 3, "op": "tab_reopen"}),
+    )
+    .await;
+    let (ack, boards) = ack_and_count(&mut socket, 3, KEEP_CLOSED - 1).await;
+    assert_eq!(ack["result"], json!({"tab": "t120", "selected": "t120"}));
+    assert_eq!(boards["closed"], KEEP_CLOSED - 1);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn a_moved_tab_keeps_its_place_after_a_restart() {
+    let folder = TempFolder::new("moved");
+    let first = serve_in(&folder.path).await;
+    let hub = first.hub.clone();
+
+    desk(&hub, json!({"op": "tab_new"}));
+    desk(&hub, json!({"op": "tab_new"}));
+    let moved = desk(&hub, json!({"op": "tab_move", "tab": "t3", "to": 0}));
+    assert_eq!(moved, json!({"tab": "t3", "order": ["t3", "t1", "t2"]}));
+    first.stop().await;
+
+    assert_eq!(
+        folder.read("index.json"),
+        "{ \"v\": 1, \"selected\": \"t3\", \"order\": [\"t3\", \"t1\", \"t2\"], \"next_tab\": 4, \"next_game_id\": 4 }\n"
+    );
+
+    let second = serve_in(&folder.path).await;
+    assert_eq!(order(&second.hub), vec!["t3", "t1", "t2"]);
+    assert_eq!(second.hub.selected().to_string(), "t3");
+
+    second.stop().await;
 }
 
 // ------------------------------------------------------------------ the person's Stop
@@ -1213,7 +1406,7 @@ async fn a_board_file_held_open_is_reported_to_the_page_and_saved_later() {
         boards,
         json!({"t": "boards", "saving": true, "notices": [
             {"id": 1, "code": "write_failed", "text": "Could not save boards/t1.json: another program has it open."}
-        ]})
+        ], "closed": 0})
     );
     let expected = saved_text(&hub, "t1");
     assert_eq!(folder.read("t1.json.pending"), expected);

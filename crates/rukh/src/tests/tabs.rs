@@ -1442,6 +1442,87 @@ async fn oversized_and_malformed_tab_messages_leave_the_socket_open() {
     server.stop().await;
 }
 
+fn order_of(frame: &Value) -> Vec<String> {
+    frame["tabs"]
+        .as_array()
+        .expect("tabs")
+        .iter()
+        .map(|t| t["id"].as_str().expect("an id").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn tab_move_to_every_place_keeps_each_tab_once() {
+    let server = serve("web").await;
+    let hub = server.hub.clone();
+    let (mut page, _) = view(server.port).await;
+
+    frame_then_ack(&mut page, 1, json!({"op": "tab_new"})).await;
+    frame_then_ack(&mut page, 2, json!({"op": "tab_new"})).await;
+
+    let moves = [
+        ("t3", 0, ["t3", "t1", "t2"]),
+        ("t3", 2, ["t1", "t2", "t3"]),
+        ("t1", 1, ["t2", "t1", "t3"]),
+    ];
+    for (i, (tab, to, order)) in moves.into_iter().enumerate() {
+        let id = i as u64 + 3;
+        let (frame, ack) = frame_then_ack(
+            &mut page,
+            id,
+            json!({"op": "tab_move", "tab": tab, "to": to}),
+        )
+        .await;
+
+        assert_eq!(
+            ack,
+            json!({"t": "ack", "id": id, "ok": true, "rev": id,
+                   "result": {"tab": tab, "order": order}})
+        );
+        assert_eq!(order_of(&frame), order);
+        assert_eq!(frame["hint"]["reason"], "tab_move");
+        assert_eq!(frame["tab"], "t3");
+    }
+
+    let ack = only_ack(
+        &mut page,
+        6,
+        json!({"op": "tab_move", "tab": "t1", "to": 1}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        json!({"t": "ack", "id": 6, "ok": true, "rev": 5,
+               "result": {"tab": "t1", "order": ["t2", "t1", "t3"]}})
+    );
+
+    let ack = only_ack(
+        &mut page,
+        7,
+        json!({"op": "tab_move", "tab": "t1", "to": 3}),
+    )
+    .await;
+    assert_eq!(
+        ack,
+        refusal(7, "bad_input", "to must be a place from 0 to 2")
+    );
+
+    let ack = only_ack(
+        &mut page,
+        8,
+        json!({"op": "tab_move", "tab": "t9", "to": 0}),
+    )
+    .await;
+    assert_eq!(ack["error"]["code"], "unknown_tab", "{ack}");
+
+    assert_eq!(hub.latest().rev, 5);
+    let order: Vec<String> =
+        hub.read_desk(|d| d.tabs().iter().map(|t| t.id().to_string()).collect());
+    assert_eq!(order, vec!["t2", "t1", "t3"]);
+
+    server.stop().await;
+}
+
 // ------------------------------------------------------------------ the published surface
 
 #[tokio::test]

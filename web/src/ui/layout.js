@@ -183,6 +183,12 @@ export function openMenu(items, at) {
   closeMenu();
 
   const menu = el('div', { class: 'menu', role: 'menu' });
+  let byKey = false; // the menu is being used from the keyboard
+
+  // Keyboard use gives focus back to the control that opened the menu.
+  const focusBack = () => {
+    if (byKey && at && typeof at.focus === 'function') at.focus();
+  };
 
   for (const it of items) {
     if (it.sep) {
@@ -194,10 +200,13 @@ export function openMenu(items, at) {
       type: 'button', role: 'menuitem', text: it.label, disabled: it.disabled, title: it.title,
       onclick: () => {
         closeMenu();
+        focusBack();
         it.onClick && it.onClick();
       },
     }));
   }
+
+  const choices = () => Array.from(menu.children).filter(b => b.tagName === 'BUTTON' && !b.disabled);
 
   document.body.appendChild(menu);
   openMenuEl = menu;
@@ -223,10 +232,28 @@ export function openMenu(items, at) {
   };
 
   const onKey = e => {
+    byKey = true;
+
     if (e.key === 'Escape') {
       closeMenu();
+      focusBack();
       e.stopPropagation();
+      return;
     }
+
+    const all = choices();
+    const focused = all.indexOf(document.activeElement);
+    let next = -1;
+
+    if (e.key === 'ArrowDown') next = (focused + 1) % all.length;
+    else if (e.key === 'ArrowUp') next = focused <= 0 ? all.length - 1 : focused - 1;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = all.length - 1;
+    if (next < 0 || !all.length) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    all[next].focus();
   };
 
   setTimeout(() => {
@@ -241,7 +268,7 @@ export function openMenu(items, at) {
     window.removeEventListener('blur', closeMenu);
   };
 
-  const first = menu.querySelector('button:not(:disabled)');
+  const [first] = choices();
   if (first) first.focus();
 
   return menu;

@@ -182,7 +182,13 @@ The server sends `hello`, then the current state frame, then every later frame. 
 
 The hello carries `proto`, which is 2. `/api/hello` carries the same number. A page built for another number stops and asks to be rebuilt.
 
-The hello also carries `boards`: `{"saving":true,"notices":[{"id":1,"code":"broken","text":"..."}]}`. `saving` says whether this program writes the boards to its data folder. `notices` are the things a person should be told about the saved boards, oldest first, the last 20. Their ids rise by one and are not reused while the program runs. When a notice is added later, every open socket gets `{"t":"boards","saving":...,"notices":[...]}` with the whole list, so the page shows only the ids it has not shown yet.
+The hello also carries `boards`: `{"saving":true,"notices":[{"id":1,"code":"broken","text":"..."}],"closed":2}`. `saving` says whether this program writes the boards to its data folder. `notices` are the things a person should be told about the saved boards, oldest first, the last 20. Their ids rise by one and are not reused while the program runs. `closed` is how many boards `tab_reopen` can bring back: the ids in `closed/` that are not open, each counted once. It is 0 when boards are not saved.
+
+When a notice is added or `closed` changes, every open socket gets `{"t":"boards","saving":...,"notices":[...],"closed":...}` with the whole object, so the page shows only the notice ids it has not shown yet.
+
+`closed` is counted at start. The saver counts it again after a pass that wrote or removed a closed board, and after each `tab_reopen`, refused or not. It lists the files on a blocking thread with no lock held.
+
+A close raises the count shortly after its ack, once the closed file is written. After a reopen the new count follows the ack. When the oldest of 20 is dropped the count stays 20 and no message is sent. A closed file that cannot be read is counted until a `tab_reopen` moves it to `broken/`.
 
 The page sends intents and gets one `ack` for each. An intent is the whole message, `{"t":"intent","id":n,"tab":"t1","op":...}`; the table reads `op` and its fields and ignores `t` and `id`. Other message types are ignored, so an older program keeps working with a newer page.
 

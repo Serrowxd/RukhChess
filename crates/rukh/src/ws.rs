@@ -177,7 +177,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>, who: String) {
     let status = boards.borrow_and_update().clone();
     let hello = json!({
         "t": "hello", "proto": PROTO, "instance": state.hub.instance(), "you": who,
-        "boards": {"saving": status.saving, "notices": status.notices},
+        "boards": status.boards(),
     });
     if !send_message(&mut socket, Message::Text(hello.to_string().into())).await {
         return;

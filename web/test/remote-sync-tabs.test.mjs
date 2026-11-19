@@ -1,7 +1,7 @@
 // Board tabs in src/net/remoteSync.js: the tab on every intent, the switch path, setup, and the tab intents.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readTabs, isTabSwitch, gameSignature, snapshotSignature, readPresence, readMatch, aiChip, TAB_LIMIT_TEXT } from '../src/net/remoteSync.js';
+import { readTabs, isTabSwitch, gameSignature, snapshotSignature, readPresence, readMatch, aiChip, firstOrientation, TAB_LIMIT_TEXT } from '../src/net/remoteSync.js';
 import { deskProgram } from './fake-program.mjs';
 
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
@@ -399,6 +399,166 @@ test('the stand-in desk sends no frame for a rename to the same name', () => {
 
   assert.equal(pr.desk.rev, rev);
   assert.deepEqual(a.toasts, []);
+
+  pr.done();
+});
+
+test('a flip on one board is not seen on another and is back on return', () => {
+  const pr = deskProgram(1);
+  const [a] = pr.pages;
+
+  a.st.actions.flip();
+  a.st.actions.setStudyTitle('Board one study');
+  assert.equal(a.st.state.orientation, 'black');
+
+  otherWindowMakesBoard(pr);
+  assert.equal(a.st.state.orientation, 'white', 'a board not shown before starts from White');
+  assert.equal(a.st.state.study.title, '');
+
+  a.st.actions.setStudyTitle('Board two study');
+  pr.view('view:9', { op: 'tab_select', tab: 't1' });
+  assert.equal(a.st.state.orientation, 'black');
+  assert.equal(a.st.state.study.title, 'Board one study');
+
+  pr.view('view:9', { op: 'tab_select', tab: 't2' });
+  assert.equal(a.st.state.orientation, 'white');
+  assert.equal(a.st.state.study.title, 'Board two study');
+
+  pr.done();
+});
+
+test('a coach game not shown before starts on the person\'s side', () => {
+  const frame = (kind, seats) => ({ tab: 't5', tabs: [{ id: 't5', name: 'Rook: game 24', kind, mark: null }], state: { match: { active: true, seats } } });
+
+  assert.equal(firstOrientation(frame('game', { white: 'engine', black: 'human' })), 'black');
+  assert.equal(firstOrientation(frame('game', { white: 'human', black: 'engine' })), 'white');
+  assert.equal(firstOrientation(frame('free', { white: 'ai', black: 'human' })), 'white', 'a free board starts from White');
+  assert.equal(firstOrientation(null), 'white');
+});
+
+test('setup whose board was closed elsewhere puts the position on a new board', () => {
+  const pr = deskProgram(1);
+  const [a] = pr.pages;
+  otherWindowMakesBoard(pr);
+  pr.view('view:9', { op: 'tab_select', tab: 't1' });
+
+  a.st.actions.flip();
+  a.st.actions.setMode('setup');
+  a.st.actions.setupPlace('h2', null);
+  pr.view('view:9', { op: 'tab_close', tab: 't1' });
+
+  assert.equal(a.st.state.mode, 'setup');
+  assert.ok(a.st.state.setup.pieces.every(p => p.square !== 'h2'), 'the scratch position is kept');
+
+  a.st.actions.setupCommit();
+  assert.deepEqual(a.ws.sent.map(s => s.op), ['tab_new'], 'a new board first');
+
+  pr.pump();
+  pr.runSoon();
+
+  assert.deepEqual(pr.sent().map(s => [s.op, s.tab]), [['tab_new', undefined], ['new_game', 't3']]);
+  assert.match(pr.desk.table('t3').game.startFen, /PPPPPPP1/);
+  assert.equal(pr.desk.table('t2').game.startFen, START, 'the other board is untouched');
+  assert.equal(a.remote.shownTab(), 't3');
+  assert.match(a.st.state.game.fen(), /PPPPPPP1/);
+  assert.equal(a.st.state.orientation, 'black', 'the setup\'s side comes along');
+  assert.deepEqual(a.toasts, []);
+
+  pr.done();
+});
+
+test('a move played while the new board for a closed setup is being made goes on that board', () => {
+  const pr = deskProgram(1);
+  const [a] = pr.pages;
+  otherWindowMakesBoard(pr);
+  pr.view('view:9', { op: 'tab_select', tab: 't1' });
+
+  a.st.actions.setMode('setup');
+  a.st.actions.setupPlace('h2', null);
+  pr.view('view:9', { op: 'tab_close', tab: 't1' });
+
+  a.st.actions.setupCommit();
+  a.st.actions.playMove('e2e4');
+  assert.deepEqual(a.ws.sent.map(s => s.op), ['tab_new'], 'nothing goes to the closed board');
+
+  pr.pump();
+  pr.runSoon();
+
+  assert.deepEqual(pr.sent().map(s => [s.op, s.tab]), [['tab_new', undefined], ['new_game', 't3'], ['play', 't3']]);
+  assert.equal(pr.desk.table('t3').game.mainline().length, 2, 'the move is on the new board');
+  assert.match(pr.desk.table('t3').game.startFen, /PPPPPPP1/);
+  assert.equal(a.remote.shownTab(), 't3');
+  assert.deepEqual(a.toasts, []);
+
+  pr.done();
+});
+
+test('setup whose board was closed, with no room for a new board, opens setup again with nothing lost', () => {
+  const pr = deskProgram(1);
+  const [a] = pr.pages;
+
+  a.st.actions.setMode('setup');
+  a.st.actions.setupPlace('h2', null);
+  for (let i = 0; i < 11; i++) otherWindowMakesBoard(pr);
+  pr.view('view:9', { op: 'tab_close', tab: 't1' });
+  otherWindowMakesBoard(pr);
+  assert.equal(pr.desk.tabs().length, 12);
+
+  a.st.actions.setupCommit();
+  pr.pump();
+  pr.runSoon();
+
+  assert.deepEqual(a.toasts, [{ text: TAB_LIMIT_TEXT, kind: 'error' }]);
+  assert.equal(a.st.state.mode, 'setup', 'back in setup');
+  assert.ok(a.st.state.setup.pieces.every(p => p.square !== 'h2'), 'the position is still there');
+  assert.equal(a.remote.shownTab(), 't1');
+  assert.ok(pr.desk.tabs().every(t => pr.desk.table(t.id).game.startFen === START), 'no board was changed');
+
+  pr.view('view:9', { op: 'tab_close', tab: 't13' });
+  a.st.actions.setupCommit();
+  pr.pump();
+  pr.runSoon();
+
+  const made = pr.desk.tabs().at(-1).id;
+  assert.match(pr.desk.table(made).game.startFen, /PPPPPPP1/);
+  assert.equal(a.remote.shownTab(), made);
+  assert.equal(a.st.state.mode, 'play');
+
+  pr.done();
+});
+
+test('the stand-in desk moves tabs and reopens closed ones as the program does', () => {
+  const pr = deskProgram(1, { saving: true });
+  const [a] = pr.pages;
+  otherWindowMakesBoard(pr);
+  otherWindowMakesBoard(pr);
+
+  assert.deepEqual(pr.view('view:9', { op: 'tab_move', tab: 't3', to: 0 }), { ok: true, result: { tab: 't3', order: ['t3', 't1', 't2'] } });
+  const rev = pr.desk.rev;
+  assert.deepEqual(pr.view('view:9', { op: 'tab_move', tab: 't3', to: 0 }).result.order, ['t3', 't1', 't2']);
+  assert.equal(pr.desk.rev, rev, 'the same place changes nothing');
+  assert.deepEqual(pr.view('view:9', { op: 'tab_move', tab: 't3', to: 3 }).error, { code: 'bad_input', message: 'to must be a place from 0 to 2' });
+  assert.equal(pr.view('view:9', { op: 'tab_move', tab: 't9', to: 0 }).error.code, 'unknown_tab');
+
+  const boards = [];
+  const receive = a.ws.receive.bind(a.ws);
+  a.ws.receive = msg => {
+    if (msg.t === 'boards') boards.push(msg);
+    receive(msg);
+  };
+
+  a.remote.closeTab('t1');
+  pr.pump();
+  assert.deepEqual(boards, [{ t: 'boards', saving: true, notices: [], closed: 1 }]);
+  assert.equal(a.remote.closedBoards(), 1);
+
+  a.remote.reopenTab();
+  pr.pump();
+  assert.deepEqual(pr.desk.tabs().map(t => t.id), ['t3', 't2', 't1']);
+  assert.equal(pr.desk.selected, 't1');
+  assert.deepEqual(boards.at(-1), { t: 'boards', saving: true, notices: [], closed: 0 });
+
+  assert.deepEqual(pr.view('view:9', { op: 'tab_reopen' }).error, { code: 'nothing_closed', message: 'There is no closed board to reopen.' });
 
   pr.done();
 });

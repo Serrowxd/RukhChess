@@ -247,9 +247,13 @@ export function cleanTabName(raw) {
   return Array.from(text).slice(0, 40).join('').trimEnd();
 }
 
-/** Several stand-in tables as tabs, with one rev for all of them. */
-export function createFakeDesk({ instance = 'fake' } = {}) {
+const MAX_CLOSED = 20;
+
+/** Several stand-in tables as tabs, with one rev for all of them; with `saving`, closed boards wait to be reopened. */
+export function createFakeDesk({ instance = 'fake', saving = false } = {}) {
   const tabs = [];
+  const closed = []; // oldest first
+  const marks = new Map();
   let nextTab = 1;
   let rev = 0;
   let hint = { reason: 'init', by: 'rukh' };
@@ -286,6 +290,18 @@ export function createFakeDesk({ instance = 'fake' } = {}) {
       return { ok: true, result: { tab: selected } };
     }
 
+    if (op === 'tab_reopen') {
+      if (!closed.length) return { ok: false, error: { code: 'nothing_closed', message: 'There is no closed board to reopen.' } };
+      if (tabs.filter(t => t.kind === 'free').length >= MAX_FREE_TABS) return { ok: false, error: { code: 'tab_limit', message: 'Close a board first.' } };
+
+      const tab = closed.pop();
+      tabs.push(tab);
+      selected = tab.id;
+
+      changed(by, op);
+      return { ok: true, result: { tab: tab.id, selected } };
+    }
+
     if (typeof intent.tab !== 'string') return badInput('the intent could not be read: missing field `tab`');
 
     const tab = find(intent.tab);
@@ -319,8 +335,29 @@ export function createFakeDesk({ instance = 'fake' } = {}) {
 
       if (selected === tab.id) selected = (tabs[at] || tabs[at - 1]).id;
 
+      if (saving && tab.kind === 'free') {
+        closed.push(tab);
+        if (closed.length > MAX_CLOSED) closed.shift();
+      }
+
       changed(by, op);
       return { ok: true, result: { closed: tab.id, selected } };
+    }
+
+    if (op === 'tab_move') {
+      const to = intent.to;
+      if (!Number.isInteger(to) || to < 0) return badInput('the intent could not be read: to');
+      if (to >= tabs.length) return badInput(`to must be a place from 0 to ${tabs.length - 1}`);
+
+      const at = tabs.indexOf(tab);
+
+      if (at !== to) {
+        tabs.splice(at, 1);
+        tabs.splice(to, 0, tab);
+        changed(by, op);
+      }
+
+      return { ok: true, result: { tab: tab.id, order: tabs.map(t => t.id) } };
     }
 
     return badInput(`the intent could not be read: unknown op ${op}`);
@@ -364,12 +401,23 @@ export function createFakeDesk({ instance = 'fake' } = {}) {
     return {
       ...shown.table.frame(nowMs), rev, hint,
       tab: shown.id,
-      tabs: tabs.map(t => ({ id: t.id, name: t.name, kind: t.kind, mark: null })),
+      tabs: tabs.map(t => ({ id: t.id, name: t.name, kind: t.kind, mark: marks.get(t.id) || null })),
     };
   }
 
+  /** Gives a tab a mark, as the program computes one; a change raises rev. */
+  function setMark(id, mark) {
+    if ((marks.get(id) || null) === mark) return;
+
+    marks.set(id, mark);
+    changed('rukh', 'mark');
+  }
+
+  /** What the program says about saving, as in the hello and the boards message. */
+  const boards = () => ({ saving, notices: [], closed: closed.length });
+
   return {
-    apply, frame,
+    apply, frame, boards, setMark,
     get rev() { return rev; },
     get selected() { return selected; },
     table: id => (find(id) || {}).table || null,

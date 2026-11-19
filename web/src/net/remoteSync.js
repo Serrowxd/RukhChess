@@ -4,6 +4,9 @@ export const PROTO = 2;
 /** Shown when the program refuses a new board at the limit. */
 export const TAB_LIMIT_TEXT = 'Close a board first.';
 
+/** The intent for a plain new board. */
+const NEW_BOARD = Object.freeze({ op: 'tab_new', name: null, copy_of: null });
+
 const INITIAL_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const PROBE_TIMEOUT_MS = 1500;
 const ACK_TIMEOUT_MS = 5000;
@@ -480,15 +483,30 @@ export function mainlineMoves(game) {
 /** Notice codes that report a repair rather than a loss. */
 const REPAIR_NOTICES = new Set(['index_rebuilt', 'added', 'selection_lost', 'fresh_board']);
 
-/** Whether boards are saved, and the program's notices about them; anything unreadable counts as not saved. */
+/** Whether boards are saved, how many closed boards wait, and the program's notices; anything unreadable counts as not saved. */
 export function readBoards(body) {
-  if (!isObject(body)) return { saving: false, notices: [] };
+  if (!isObject(body)) return { saving: false, notices: [], closed: 0 };
 
   const notices = (Array.isArray(body.notices) ? body.notices : [])
     .filter(n => isObject(n) && Number.isFinite(n.id) && typeof n.text === 'string' && n.text)
     .map(n => ({ id: n.id, code: typeof n.code === 'string' ? n.code : '', text: n.text }));
 
-  return { saving: body.saving === true, notices };
+  const saving = body.saving === true;
+  const closed = saving && Number.isInteger(body.closed) && body.closed > 0 ? body.closed : 0;
+
+  return { saving, notices, closed };
+}
+
+/** The orientation a tab the page has not shown yet starts with: a coach game starts on the person's side. */
+export function firstOrientation(frame) {
+  const { tab, tabs } = readTabs(frame);
+  const entry = tabs.find(t => t.id === tab);
+  if (!entry || entry.kind !== 'game') return 'white';
+
+  const seats = readMatch(isObject(frame.state) ? frame.state.match : null).seats;
+  if (seats.white === 'human' && seats.black !== 'human') return 'white';
+  if (seats.black === 'human' && seats.white !== 'human') return 'black';
+  return 'white';
 }
 
 /** The toast kind a notice is shown with. */
@@ -579,7 +597,8 @@ export function startRemoteSync(deps) {
   let batchRefusal = null; // first refusal among the intents in flight
   let shownTab = null; // the tab whose game the page shows
   let shownFrame = null; // the newest frame for that tab
-  const tabMeta = new Map(); // tab id -> the page-only study fields
+  let rescue = null; // while a setup commit waits for its new board, what the page played meanwhile
+  const tabMeta = new Map(); // tab id -> the page-only study fields and orientation
   const leaving = new Set(); // called before the page leaves a tab
   let boards = readBoards(null);
   let helloInstance = null;
@@ -632,6 +651,14 @@ export function startRemoteSync(deps) {
     actions.toast('This board cannot read the game the Rukh program sent. Reload the page; if that does not help, rebuild the board or update Rukh.', 'error');
   }
 
+  /** What the page alone keeps for the shown tab. */
+  function pageMeta() {
+    const st = store.state;
+    return { title: st.study.title, created: st.study.created, notes: st.study.notes, orientation: st.orientation };
+  }
+
+  const isOpenTab = id => readTabs(latest).tabs.some(t => t.id === id);
+
   /** True while a game intent made for `tab` waits for its ack. */
   function pendingFor(tab) {
     for (const p of pending.values()) if (p.game && p.tab === tab) return true;
@@ -651,15 +678,17 @@ export function startRemoteSync(deps) {
     const st = store.state;
     queuedGoto = null;
 
-    tabMeta.set(shownTab, { title: st.study.title, created: st.study.created, notes: st.study.notes });
+    tabMeta.set(shownTab, pageMeta());
     shownTab = tab;
     shownFrame = latest;
 
     const open = new Set(readTabs(latest).tabs.map(t => t.id));
     for (const id of [...tabMeta.keys()]) if (!open.has(id)) tabMeta.delete(id);
 
+    const meta = tabMeta.get(tab) || { orientation: firstOrientation(latest) };
+
     try {
-      const study = snapshotToStudy(latestGame(), { ...(tabMeta.get(tab) || {}), orientation: st.orientation });
+      const study = snapshotToStudy(latestGame(), meta);
       guard.run(() => actions.loadStudy(study));
     } catch (e) {
       warnBadFrame(e);
@@ -675,7 +704,7 @@ export function startRemoteSync(deps) {
     if (frameTab === shownTab) shownFrame = latest;
 
     // Never pull someone out of setup mode; its commit goes to the tab it was started on.
-    if (store.state.mode !== 'play') return;
+    if (store.state.mode !== 'play' || rescue) return;
 
     if (isTabSwitch(shownTab, latest)) {
       switchTo(frameTab);
@@ -729,8 +758,23 @@ export function startRemoteSync(deps) {
     pending.delete(id);
   }
 
+  /** Tells an intent's own listener how it ended; null when no answer came. */
+  function finish(entry, msg) {
+    if (!entry || typeof entry.done !== 'function') return;
+
+    try {
+      entry.done(msg);
+    } catch (e) {
+      console.warn('[rukh] a listener failed:', e && e.message);
+    }
+  }
+
   function failAllPending() {
-    for (const id of [...pending.keys()]) settle(id);
+    for (const [id, entry] of [...pending]) {
+      settle(id);
+      if (!stopped) finish(entry, null);
+    }
+
     batchRefusal = null;
   }
 
@@ -777,7 +821,9 @@ export function startRemoteSync(deps) {
     }
 
     const timer = setT(() => {
+      const entry = pending.get(id);
       pending.delete(id);
+      finish(entry, null);
       if (!pending.size) batchDone();
     }, ackTimeoutMs);
 
@@ -789,7 +835,7 @@ export function startRemoteSync(deps) {
   const sendGame = (intent, tab) => post(tab === null ? intent : { ...intent, tab }, { game: true, tab });
 
   /** A tab intent, which names its own tab. */
-  const sendTab = intent => post(intent, { game: false, tab: null });
+  const sendTab = (intent, done) => post(intent, { game: false, tab: null, done });
 
   function onAck(msg) {
     const entry = pending.get(msg.id);
@@ -810,6 +856,8 @@ export function startRemoteSync(deps) {
       const first = isObject(rejected[0]) && typeof rejected[0].reason === 'string' ? rejected[0].reason : 'not accepted';
       batchRefusal = { code: 'rejected', message: rejected.length > 1 ? `${first} (and ${rejected.length - 1} more)` : first, tab: entry.tab };
     }
+
+    finish(entry, msg);
 
     // Ok or not, the program's latest frame is the truth.
     if (!pending.size) batchDone();
@@ -907,6 +955,12 @@ export function startRemoteSync(deps) {
 
     if (!intents.length) return;
 
+    // Played while the new board is being made, so it goes there after the setup.
+    if (rescue) {
+      rescue.push(...intents.filter(i => i.op !== 'goto').map(({ from_node: _node, ...intent }) => intent));
+      return;
+    }
+
     if (reason === 'goto') {
       // Navigation made in one go is sent once, as the node the page ends on.
       queueGoto(intents[0].node, tab);
@@ -922,6 +976,11 @@ export function startRemoteSync(deps) {
     // Anything else is played where the page now is, so waiting navigation goes first.
     if (!flushGoto(false)) return;
 
+    if (reason === 'setup' && tab !== null && !isOpenTab(tab)) {
+      setupOnNewBoard(intents);
+      return;
+    }
+
     if (reason === 'load' && intents.length > 1) {
       actions.toast('Only the main line is shared with the Rukh program in this build; variations and notes of the loaded game are not kept', 'info');
     }
@@ -933,6 +992,39 @@ export function startRemoteSync(deps) {
         return;
       }
     }
+  }
+
+  /** A setup committed after its board was closed goes on a new board; if none can be made, setup opens again. */
+  function setupOnNewBoard(intents) {
+    const meta = pageMeta();
+    rescue = [];
+
+    const backToSetup = () => {
+      rescue = null;
+      actions.setMode('setup');
+    };
+
+    const made = sendTab(NEW_BOARD, msg => {
+      const tab = msg && msg.ok && isObject(msg.result) && typeof msg.result.tab === 'string' ? msg.result.tab : null;
+      if (tab === null) return backToSetup();
+
+      tabMeta.set(tab, meta);
+
+      const played = rescue || [];
+      rescue = null;
+
+      for (const intent of [...intents, ...played]) {
+        if (sendGame(intent, tab)) continue;
+
+        actions.toast(NOT_SHARED, 'error');
+        return backToSetup();
+      }
+    });
+
+    if (made) return;
+
+    actions.toast(NOT_SHARED, 'error');
+    backToSetup();
   }
 
   let queuedGoto = null; // { node, tab }
@@ -1053,6 +1145,7 @@ export function startRemoteSync(deps) {
     // Deferred so a setup commit's own game:change is handled first.
     store.on('mode:change', ({ mode } = {}) => {
       if (mode === 'play') setT(() => applyLatest(), 0);
+      notify();
     }),
   ];
 
@@ -1096,13 +1189,27 @@ export function startRemoteSync(deps) {
     /** The selected tab and the list the strip draws. */
     tabs: () => readTabs(latest),
 
+    /** How many closed boards the program can bring back. */
+    closedBoards: () => boards.closed,
+
     /** The tab whose game the page shows; in setup, the tab setup began on. */
     shownTab: () => shownTab,
 
+    /** In setup, the board it began on: { tab, name, open }; otherwise null. */
+    setupBoard() {
+      if (store.state.mode !== 'setup' || shownTab === null) return null;
+
+      const named = frame => readTabs(frame).tabs.find(t => t.id === shownTab);
+      const known = named(latest) || named(shownFrame);
+      return { tab: shownTab, name: known ? known.name : shownTab, open: isOpenTab(shownTab) };
+    },
+
     selectTab: id => sendTabControl({ op: 'tab_select', tab: id }),
-    newTab: () => sendTabControl({ op: 'tab_new', name: null, copy_of: null }),
+    newTab: () => sendTabControl(NEW_BOARD),
     renameTab: (id, name) => sendTabControl({ op: 'tab_rename', tab: id, name: String(name) }),
     closeTab: id => sendTabControl({ op: 'tab_close', tab: id }),
+    moveTab: (id, to) => sendTabControl({ op: 'tab_move', tab: id, to }),
+    reopenTab: () => sendTabControl({ op: 'tab_reopen' }),
 
     /** Calls fn just before the page leaves a tab, while the old tab is still shown. */
     beforeSwitch(fn) {

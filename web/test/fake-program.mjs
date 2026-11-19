@@ -20,9 +20,9 @@ export class FakeSocket {
   receive(msg) { this.onmessage({ data: JSON.stringify(msg) }); }
 }
 
-/** A desk with `n` pages on it; pump() applies every sent intent, frame first, then the ack. */
-export function deskProgram(n = 1) {
-  const desk = createFakeDesk({ instance: 'i1' });
+/** A desk with `n` pages on it; pump() applies every sent intent, frame first, then the ack; with `saving`, the boards message after. */
+export function deskProgram(n = 1, { saving = false } = {}) {
+  const desk = createFakeDesk({ instance: 'i1', saving });
   const pages = [];
 
   // The pages' timers wait here until a test runs them.
@@ -52,7 +52,7 @@ export function deskProgram(n = 1) {
 
     const ws = FakeSocket.last;
     ws.onopen();
-    ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: `view:${i + 1}` });
+    ws.receive({ t: 'hello', proto: 2, instance: 'i1', you: `view:${i + 1}`, boards: desk.boards() });
 
     const events = [];
     st.on('game:change', p => events.push(p.reason));
@@ -68,6 +68,17 @@ export function deskProgram(n = 1) {
     for (const p of pages) p.ws.receive(f);
   };
 
+  // As the program does, the boards message goes to every page only when the closed count changes.
+  let closedSent = desk.boards().closed;
+
+  const tellBoards = () => {
+    const now = desk.boards();
+    if (!saving || now.closed === closedSent) return;
+
+    closedSent = now.closed;
+    for (const p of pages) p.ws.receive({ t: 'boards', ...now });
+  };
+
   let intents = [];
 
   /** Applies one intent as the program does: the frame goes out first, then the ack. */
@@ -80,6 +91,7 @@ export function deskProgram(n = 1) {
     if (desk.rev !== before) broadcast();
 
     p.ws.receive(res.ok ? { t: 'ack', id, ok: true, rev: desk.rev, result: res.result } : { t: 'ack', id, ok: false, error: res.error });
+    tellBoards();
   }
 
   const pump = () => {
@@ -102,13 +114,21 @@ export function deskProgram(n = 1) {
     const before = desk.rev;
     const res = desk.apply(by, intent);
     if (desk.rev !== before) broadcast();
+    tellBoards();
     return res;
+  };
+
+  /** The program gives a tab a mark. */
+  const mark = (id, value) => {
+    const before = desk.rev;
+    desk.setMark(id, value);
+    if (desk.rev !== before) broadcast();
   };
 
   broadcast();
 
   return {
-    desk, pages, pump, deliver, view, broadcast, runSoon,
+    desk, pages, pump, deliver, view, mark, broadcast, runSoon,
     sent: () => intents,
     clearSent: () => { intents = []; },
     done: () => {

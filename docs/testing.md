@@ -23,7 +23,7 @@ The engine tests in `uci.test.mjs` start the real Stockfish build from `web/vend
 | File | Covers |
 | --- | --- |
 | `board-mapping.test.mjs` | Square to world coordinates and back (`three/board.js`). |
-| `board-tabs.test.mjs` | The board strip (`ui/boardTabs.js`) on a small stand-in DOM, the not-saved line and the program's notices about saved boards. |
+| `board-tabs.test.mjs` | The board strip (`ui/boardTabs.js`) on a small stand-in DOM: menus, moving, reopening, marks, the setup line, redrawing in place under a press, the not-saved line, the program's notices about saved boards, and the move list's scroll on a switch. What it says about a narrow row rests on reading the stylesheet, not on a layout. |
 | `core-chess960.test.mjs` | Chess960 numbering and castling rights (`core/chess960.js`). |
 | `core-clock.test.mjs` | The chess clock arithmetic (`core/clock.js`). |
 | `core-game.test.mjs` | Rules, castling forms, the move tree, SAN and UCI (`core/game.js`). |
@@ -39,14 +39,14 @@ The engine tests in `uci.test.mjs` start the real Stockfish build from `web/vend
 | `quality-levels.test.mjs` | The quality setting and what each level turns on. |
 | `remote-sync.test.mjs` | Remote mode: frames, signatures and the socket shell (`net/remoteSync.js`). Its frames carry no `tab`, so it runs the one-unnamed-board path; the tab wire is proven by the tab tests. |
 | `remote-sync-step2.test.mjs` | Remote mode with node ids, matches, presence and the AI chip. |
-| `remote-sync-tabs.test.mjs` | Remote mode with board tabs: the tab on every intent, the switch path, setup. |
+| `remote-sync-tabs.test.mjs` | Remote mode with board tabs: the tab on every intent, the switch path, setup and its commit after its board was closed, the orientation and title kept per board. |
 | `render-on-demand.test.mjs` | Drawing only when something visible may have changed (`three/scene.js`). |
 | `stand-ins.test.mjs` | Low-detail stand-ins for modelled sets (`three/pieces.js`, `three/silhouette.js`). |
 | `stand-ins-view.test.mjs` | The view drawing shadows and the edge mask from the stand-ins. |
 | `uci.test.mjs` | UCI parsing and the Stockfish driver (`engine/`). |
 | `view-modes.test.mjs` | View mode, seat rotation and lighting (`three/scene.js`), and the 2D board look. |
 
-`fake-table.mjs` and `fake-program.mjs` are helpers, not test files. `node --test` still loads every `.mjs` under `test/`, so each counts as one passing test.
+`fake-table.mjs` and `fake-program.mjs` are helpers, not test files. The stand-in desk moves tabs, gives them marks and, made with `saving`, keeps closed boards for `tab_reopen` and sends the `boards` message when their count changes, as the program does. `node --test` still loads every `.mjs` under `test/`, so each counts as one passing test.
 
 ## Running three without a browser
 

@@ -145,6 +145,15 @@ impl Hub {
         self.status.send_modify(|status| status.add(code, text));
     }
 
+    /// Sets how many closed boards wait; open sockets are told only when it changes.
+    pub fn set_closed(&self, count: usize) {
+        self.status.send_if_modified(|status| {
+            let changed = status.closed != count;
+            status.closed = count;
+            changed
+        });
+    }
+
     /// True when this program writes the boards to its data folder.
     pub fn saves(&self) -> bool {
         self.saver.is_some()
