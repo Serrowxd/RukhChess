@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::hub::Hub;
 use crate::{start, Running};
 
+mod coach;
 mod saving;
 mod tabs;
 

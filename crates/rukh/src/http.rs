@@ -1,4 +1,4 @@
-//! The HTTP side: board files, `/api/hello`, the view socket and MCP, behind one Host/Origin guard.
+//! The HTTP side: board files, `/api/hello`, the view socket, the coach routes and MCP, behind one Host/Origin guard.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
@@ -9,10 +9,11 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use tokio::sync::watch;
 
+use crate::coach::{routes as coach, Coach};
 use crate::hub::Hub;
 
 /// Protocol version shared by `/api/hello` and the WebSocket hello.
@@ -26,6 +27,7 @@ pub struct AppState {
     pub next_view: AtomicU64,
     /// True while the program is shutting down.
     pub shutdown: watch::Receiver<bool>,
+    pub coach: Arc<Coach>,
 }
 
 impl AppState {
@@ -38,6 +40,9 @@ pub fn router(state: Arc<AppState>, mcp: crate::mcp::Service) -> Router {
     Router::new()
         .route("/api/hello", get(hello))
         .route("/api/ws", get(crate::ws::upgrade))
+        .route("/api/coach/import/text", post(coach::import_text))
+        .route("/api/coach/import/undo", post(coach::undo))
+        .route("/api/coach/names", post(coach::names))
         .nest_service("/mcp", mcp)
         .fallback(static_file)
         .layer(middleware::from_fn_with_state(state.clone(), guard))

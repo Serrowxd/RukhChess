@@ -118,24 +118,36 @@ impl Folder {
     }
 }
 
+/// What this program does with the data folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderUse {
+    NoFolder,
+    Saving,
+    /// Another live Rukh holds the lock, on this port.
+    HeldBy(u16),
+    Failed,
+}
+
 /// What the program starts with.
 pub struct Opened {
     pub desk: Desk,
     pub status: Status,
     /// Set when this program saves the boards.
     pub saving: Option<(Folder, Lock)>,
+    pub folder_use: FolderUse,
 }
 
 /// Takes the folder's lock and restores the boards; with no lock the boards live in memory.
 pub async fn open(data_dir: Option<PathBuf>, port: u16, instance: &str) -> Opened {
-    let memory = |notices: Vec<(&'static str, String)>| Opened {
+    let memory = |folder_use, notices: Vec<(&'static str, String)>| Opened {
         desk: Desk::new(instance),
         status: Status::new(false, notices),
         saving: None,
+        folder_use,
     };
 
     let Some(dir) = data_dir else {
-        return memory(Vec::new());
+        return memory(FolderUse::NoFolder, Vec::new());
     };
 
     let made = {
@@ -143,31 +155,38 @@ pub async fn open(data_dir: Option<PathBuf>, port: u16, instance: &str) -> Opene
         tokio::task::spawn_blocking(move || fs::create_dir_all(dir)).await
     };
     if let Err(e) = made.map_err(io::Error::other).and_then(|r| r) {
-        return memory(vec![(
-            "folder_failed",
-            format!(
-                "Could not use the data folder {}: {e}. Boards are not being saved.",
-                dir.display()
-            ),
-        )]);
+        return memory(
+            FolderUse::Failed,
+            vec![(
+                "folder_failed",
+                format!(
+                    "Could not use the data folder {}: {e}. Boards are not being saved.",
+                    dir.display()
+                ),
+            )],
+        );
     }
 
     match Lock::acquire(&dir, port, instance, now_ms()).await {
         Locked::Ours(lock) => open_locked(&dir, lock, port, instance).await,
-        Locked::Held { port } => memory(vec![second_program(port)]),
-        Locked::Failed(e) => memory(vec![(
-            "folder_failed",
-            format!("Could not lock the data folder: {e}. Boards are not being saved."),
-        )]),
+        Locked::Held { port } => memory(FolderUse::HeldBy(port), vec![second_program(port)]),
+        Locked::Failed(e) => memory(
+            FolderUse::Failed,
+            vec![(
+                "folder_failed",
+                format!("Could not lock the data folder: {e}. Boards are not being saved."),
+            )],
+        ),
     }
 }
 
 /// Restores the boards under a lock just taken; saves only if the lock still names this program after.
 pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> Opened {
-    let memory = |notices: Vec<(&'static str, String)>| Opened {
+    let memory = |folder_use, notices: Vec<(&'static str, String)>| Opened {
         desk: Desk::new(instance),
         status: Status::new(false, notices),
         saving: None,
+        folder_use,
     };
 
     let folder = Folder::new(dir);
@@ -181,13 +200,16 @@ pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> O
         Ok(restored) => restored,
         Err(e) => {
             release(lock).await;
-            return memory(vec![(
-                "folder_failed",
-                format!(
-                    "Could not use the boards folder {}: {e}. Boards are not being saved.",
-                    folder.boards.display()
-                ),
-            )]);
+            return memory(
+                FolderUse::Failed,
+                vec![(
+                    "folder_failed",
+                    format!(
+                        "Could not use the boards folder {}: {e}. Boards are not being saved.",
+                        folder.boards.display()
+                    ),
+                )],
+            );
         }
     };
 
@@ -201,7 +223,7 @@ pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> O
 
     if owner.as_ref().map(|(_, id)| id.as_str()) != Some(instance) {
         let port = owner.map_or(port, |(port, _)| port);
-        return memory(vec![second_program(port)]);
+        return memory(FolderUse::HeldBy(port), vec![second_program(port)]);
     }
 
     let mut desk = restored.desk;
@@ -213,6 +235,7 @@ pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> O
             desk,
             status: Status::new(false, restored.notices),
             saving: None,
+            folder_use: FolderUse::Failed,
         };
     }
 
@@ -223,6 +246,7 @@ pub async fn open_locked(dir: &Path, lock: Lock, port: u16, instance: &str) -> O
         desk,
         status,
         saving: Some((folder, lock)),
+        folder_use: FolderUse::Saving,
     }
 }
 
@@ -281,32 +305,17 @@ fn oversized_tab_file(name: &str) -> bool {
         && tab_file_id(name).is_none()
 }
 
-/// `t4.json.tmp-1234`, left by a program that was stopped in the middle of a write.
-fn is_temp_file(name: &str) -> bool {
-    name.rsplit_once(".tmp-")
-        .is_some_and(|(_, pid)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
-}
-
 /// Moves a file whole to `broken/<stem>.<ms>.json`; returns its name in `broken/`.
 fn move_to_broken(folder: &Folder, from: &Path, stem: &str, now_ms: u64) -> io::Result<String> {
-    let mut ms = now_ms;
-
-    loop {
-        let name = format!("{stem}.{ms}.json");
-        let to = folder.broken().join(&name);
-
-        if !to.exists() {
-            fs::rename(from, &to)?;
-            return Ok(name);
-        }
-        ms += 1;
-    }
+    safe::move_aside(from, &folder.broken(), now_ms, |ms| {
+        format!("{stem}.{ms}.json")
+    })
 }
 
 /// Moves temp files left by a stopped program out of the way, into `broken/`, under their own names.
 fn set_temp_files_aside(folder: &Folder, dir: &Path, now_ms: u64) {
     for name in file_names(dir).unwrap_or_default() {
-        if !is_temp_file(&name) {
+        if !safe::is_temp_file(&name) {
             continue;
         }
 

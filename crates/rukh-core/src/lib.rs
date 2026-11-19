@@ -13,6 +13,7 @@ use shakmaty::{
 pub mod chess960;
 pub mod desk;
 pub mod intent;
+pub mod pgn;
 pub mod saved;
 pub mod session;
 pub mod table;
@@ -361,6 +362,44 @@ fn load_position(fen: &str, mode: Option<CastlingMode>) -> Result<(Chess, Castli
     Ok((pos, mode))
 }
 
+/// Longest part of a refused move that a SAN refusal repeats.
+pub(crate) const MAX_SHOWN_MOVE_CHARS: usize = 20;
+
+/// Text written by strangers, kept to printable ASCII and cut, for an error to repeat.
+pub(crate) fn shown_text(bytes: &[u8], most: usize) -> String {
+    bytes
+        .iter()
+        .filter(|b| (b' '..=b'~').contains(*b))
+        .take(most)
+        .map(|b| char::from(*b))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// SAN only: check and mate marks and trailing `!` or `?` are tolerated, castling may use zeros.
+pub(crate) fn san_move(pos: &Chess, text: &str) -> Option<Move> {
+    let bare = text.trim().trim_end_matches(['!', '?', '+', '#']);
+    let bare = match bare {
+        "0-0" => "O-O",
+        "0-0-0" => "O-O-O",
+        other => other,
+    };
+
+    match San::from_ascii(bare.as_bytes()).ok()? {
+        // A pawn move naming its square of origin with no capture is UCI, as in `e2e4`.
+        San::Normal {
+            role: Role::Pawn,
+            file: Some(_),
+            rank: Some(_),
+            capture: false,
+            ..
+        } => None,
+        san @ (San::Normal { .. } | San::Castle(_)) => san.to_move(pos).ok(),
+        San::Put { .. } | San::Null => None,
+    }
+}
+
 fn make_fen(pos: &Chess) -> String {
     Fen::from_position(pos, EnPassantMode::Legal).to_string()
 }
@@ -673,9 +712,31 @@ impl Game {
             })
     }
 
+    /// Reads a move written in SAN only, as game text writes it; UCI is refused.
+    pub fn parse_san(&self, text: &str) -> Result<Move, Error> {
+        san_move(&self.pos, text).ok_or_else(|| {
+            let shown = shown_text(text.as_bytes(), MAX_SHOWN_MOVE_CHARS);
+
+            Error::IllegalMove(format!(
+                "{shown} is not a legal move in SAN here ({} to move)",
+                self.turn()
+            ))
+        })
+    }
+
     /// Plays a move and steps onto it, reusing a matching continuation instead of duplicating it.
     pub fn play(&mut self, text: &str) -> Result<Played, Error> {
         let m = self.parse_move(text)?;
+        self.play_move(m)
+    }
+
+    /// Like [`Game::play`], for a move written in SAN only.
+    pub fn play_san(&mut self, text: &str) -> Result<Played, Error> {
+        let m = self.parse_san(text)?;
+        self.play_move(m)
+    }
+
+    fn play_move(&mut self, m: Move) -> Result<Played, Error> {
         let uci = UciMove::from_move(m, self.mode).to_string();
 
         let captured = if m.is_en_passant() {

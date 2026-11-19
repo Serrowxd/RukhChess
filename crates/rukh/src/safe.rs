@@ -142,6 +142,79 @@ pub fn write_with(
     Ok(())
 }
 
+/// Why a write-once file did not land.
+#[derive(Debug)]
+pub enum NewFailure {
+    /// Something is already at the path; it is left as it was.
+    Exists,
+    Failed(io::Error),
+}
+
+/// Writes a file that must not exist yet: temp file, then a link that refuses an existing target.
+pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), NewFailure> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(NewFailure::Exists);
+    }
+
+    let temp = temp_path(path);
+    let written = File::create(&temp).and_then(|mut file| {
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()
+    });
+    if let Err(e) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(NewFailure::Failed(e));
+    }
+
+    let linked = match fs::hard_link(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(NewFailure::Exists),
+        // A file system without hard links: the check above stands in for the link's refusal.
+        Err(_) => fs::rename(&temp, path).map_err(NewFailure::Failed),
+    };
+    let _ = fs::remove_file(&temp);
+    linked?;
+
+    let length = fs::metadata(path).map_err(NewFailure::Failed)?.len();
+    if length != bytes.len() as u64 {
+        return Err(NewFailure::Failed(io::Error::other(format!(
+            "the file reads back as {length} bytes, not {}",
+            bytes.len()
+        ))));
+    }
+
+    Ok(())
+}
+
+/// Moves a file into `dir` under the first free name `name(n)` gives from `n` up; never overwrites.
+pub fn move_aside(
+    from: &Path,
+    dir: &Path,
+    first: u64,
+    name: impl Fn(u64) -> String,
+) -> io::Result<String> {
+    fs::create_dir_all(dir)?;
+
+    let mut n = first;
+    loop {
+        let candidate = name(n);
+        let to = dir.join(&candidate);
+
+        if fs::symlink_metadata(&to).is_err() {
+            fs::rename(from, &to)?;
+            return Ok(candidate);
+        }
+        n += 1;
+    }
+}
+
+/// True for `name.tmp-<pid>`, left by a program stopped in the middle of a write.
+pub fn is_temp_file(name: &str) -> bool {
+    name.rsplit_once(".tmp-")
+        .is_some_and(|(_, pid)| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The instance id `/api/hello` gives on `127.0.0.1:<port>`, by a GET written by hand.
 pub async fn hello_instance(port: u16) -> Option<String> {
     tokio::time::timeout(HELLO_TIMEOUT, ask_hello(port))

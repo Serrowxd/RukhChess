@@ -1,0 +1,10 @@
+[package]
+name = "rukh-coach"
+description = "The coach behind Rukh: game records, keys, batches and the rules of an import, as functions on data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

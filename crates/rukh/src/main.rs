@@ -2,6 +2,7 @@
 
 mod boards;
 mod cli;
+mod coach;
 mod http;
 mod hub;
 mod mcp;
@@ -23,8 +24,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::boards::Saver;
+use crate::boards::{FolderUse, Saver};
 use crate::cli::Command;
+use crate::coach::{Coach, Holding};
 use crate::http::AppState;
 use crate::hub::Hub;
 
@@ -38,6 +40,7 @@ pub struct Running {
     task: JoinHandle<std::io::Result<()>>,
     saver: Option<JoinHandle<()>>,
     lock: Option<safe::Lock>,
+    coach: Arc<Coach>,
 }
 
 impl Running {
@@ -55,8 +58,12 @@ impl Running {
             None => true,
         };
 
-        // A saver still writing keeps the lock; the next start finds it stale and replaces it.
-        if let (true, Some(lock)) = (saved, self.lock) {
+        let coach = self.coach;
+        let closing = tokio::task::spawn_blocking(move || coach.close());
+        let closed = tokio::time::timeout_at(deadline, closing).await.is_ok();
+
+        // Work still writing keeps the lock; the next start finds it stale.
+        if let (true, true, Some(lock)) = (saved, closed, self.lock) {
             let _ = tokio::task::spawn_blocking(move || lock.release()).await;
         }
     }
@@ -72,7 +79,8 @@ pub async fn start(
     let instance = hub::new_instance_id();
     let (stop, stopped) = watch::channel(false);
 
-    let opened = boards::open(data_dir, port, &instance).await;
+    let opened = boards::open(data_dir.clone(), port, &instance).await;
+    let folder_use = opened.folder_use;
 
     let (hub, saver, lock) = match opened.saving {
         Some((folder, lock)) => {
@@ -94,7 +102,17 @@ pub async fn start(
         }
     };
 
+    let holding = match (&data_dir, folder_use) {
+        (Some(dir), FolderUse::Saving) => Holding::Ours(dir),
+        (_, FolderUse::HeldBy(port)) => Holding::Another(port),
+        (None, _) | (_, FolderUse::NoFolder) => Holding::NoFolder,
+        (Some(_), FolderUse::Failed) => Holding::Failed,
+    };
+
+    let coach = Arc::new(Coach::new(holding, hub.clone()));
+
     let state = Arc::new(AppState {
+        coach: coach.clone(),
         hub: hub.clone(),
         port,
         web_dir,
@@ -127,6 +145,7 @@ pub async fn start(
         task,
         saver,
         lock,
+        coach,
     })
 }
 

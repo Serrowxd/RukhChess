@@ -105,3 +105,25 @@ In Chess960, when the king is already on its castling destination or one empty s
 The Stockfish glue is CommonJS, but the web package is `"type": "module"`. `uci.test.mjs` copies the glue and its WASM into a folder under the system temp directory with its own `package.json`, and runs it there through Node's CLI mode. A small Worker-like shim passes lines to its stdin and reads its stdout.
 
 `log.events` keeps both directions in one ordered list. `assertQueueSane()` walks it to check the queue invariant: never a second `go` without a `bestmove` in between, and no `position` or `setoption` while a search is still running.
+
+# Coach tests
+
+The coach's tests are Rust tests, run with `cargo test --workspace`.
+
+- `crates/rukh-core/tests/pgn.rs` checks the game-text reader on hand-made text shaped like the sites' exports and like pasted text, with invented names.
+- `crates/rukh-coach/tests/coach.rs` checks the records and rules on hand-made data: the hash and a pinned move key, name cleaning, endings, skip reasons, site keys, time controls, thinking times, the game file's byte-for-byte round trip, unknown fields kept, sorting an import, ids, the profile and the counters.
+- `crates/rukh/src/tests/coach.rs` runs the real server on a fresh temp folder per test and talks to it over hand-written HTTP. It covers imports, already-here, two exports of one game, skip counts, a kill after game k of n and after the raw text only, the counter and counters past the highest id, a file in the way of a game, a game file missing from the key index, a rebuilt key index, damaged and newer files, leftover temp files, undo (also part way and with no folder), adding and removing names, every content type and refusal, a broken or oversized chunked body, UTF-16 text, more than 50,000 games, raw text kept for skipped and undated games, set-up games, a failed write, no data folder, an unusable folder, a stopping program, a second program, the hub lock, a game folder that cannot be listed, a game file that cannot be read while the key index is rebuilt, a persona file that cannot be looked at, a text past the limit that is sent whole, a text that waits for its turn, a stalled body and a trickling body that give up their turn, and the castling flag of a set-up game. In test builds a body may pause for 2 seconds instead of 30 and take 5 seconds in all instead of 5 minutes, so the stall and trickle tests are quick.
+
+The test of 2,000 games in one text is left out of the default run. It writes 2,000 game files in a burst, and while it does, a board save in another test can take more than a second longer, past the saving tests' timing bounds. Run it on its own, and it prints the import time:
+
+```
+cargo test -p rukh two_thousand -- --ignored --nocapture
+```
+
+A body past the limit is still read and thrown away, up to 64 MiB, so the client gets its answer instead of a reset connection. The tests that send such bodies write the whole body before they read the answer, as a simple client does.
+
+A kill is not simulated by stopping a process. The test imports, stops the program, then puts the folder back the way a kill after that write would have left it, and starts again.
+
+Every fixture is made up in the test, with invented player names.
+
+A folder that cannot be listed and a file that cannot be looked at or read come from `HIDDEN` in `crates/rukh/src/coach/store.rs`, a list of paths that fail that way in test builds only.

@@ -40,6 +40,27 @@ The table also strips a leading move number (`12.`, `3...`) and trailing `!` or 
 
 Moves are written back in UCI with castling as `e1g1` in standard chess and as king-to-rook (`e1h1`) in Chess960.
 
+`Game::parse_san` and `Game::play_san` read SAN only, the way game text writes it. Check and mate marks and trailing `!` or `?` are ignored, castling may be written with zeros, and a promotion needs the equals sign. UCI is refused, so `B1c3` with a knight on b1 is not read as the move b1c3, and a pawn move written from square to square with no capture (`e2e4`) is refused. A pawn written with its letter (`Pe4`) and a promotion letter in lower case (`e8=q`) are read. A refusal repeats at most 20 characters of the move, printable ASCII only.
+
+## Game text
+
+`pgn::read_each` reads game text (PGN) from bytes, as Lichess and chess.com export it and as people paste it, and hands each game to the caller as soon as it is read: a game, or a game it could not read, each with the byte offsets of its text in the input. The caller may stop the reading after any game. It is given the most plies to replay; a game with more is handed over marked `too_long`, without its moves. `pgn::read_games` collects every game of a text, with no ply limit.
+
+- Many games in one text. Text before the first tag and between games is skipped. Moves with no tags start a game only at `1.` followed by a legal first move.
+- Tags: escaped quotes and backslashes are read. At most 64 tags a game are read; the rest are counted and ignored. A value is cut at 255 characters. Only a fixed list of tags is kept (`KeptTags`); the caller cleans names. A comment or a `;` line between two tags stays inside the game.
+- Bytes that are not UTF-8 are read as Latin-1, tag value by tag value. A byte-order mark, CRLF, LF and bare CR all read. A line starting with `%` is skipped. A no-break space reads as a space. `pgn::is_utf16` tells a caller that the text starts with a UTF-16 byte-order mark; the reader does not decode it.
+- The main line is replayed through the rules. Move numbers may be `1.`, `1...` or joined to the move (`1.e4`). Move numbers are not checked against the ply. Comments, variations, glyphs and every other tag are skipped. Variations are skipped with a depth counter, never recursion, and counted. A `[%...]` command among the moves reads as a comment.
+- A clock is taken from `[%clk h:mm:ss]` or `[%clk h:mm:ss.s]` in a comment after a main-line move, the first well-formed one, in milliseconds. Minutes and seconds are two digits, hours at most four. A clock in a variation or before the first move is not taken. Any well-formed clock in the comment counts, also one inside a person's sentence.
+- The result is the marker after the moves, else the `Result` tag. `1/2` and `½-½` after the moves are read as a draw. A game with no marker and no tag has none. The result is not checked against the final position.
+- `last` reports how the final position stands: mate, stalemate, insufficient material, the fifty-move rule and how many times the position has stood.
+- The `Variant` tag decides the rules: missing, blank, `Standard` or `From Position` is standard chess, `Chess960` is Chess960 from the `FEN` tag. Any other name, also one with no ASCII letters, is not replayed and is reported with its name in printable ASCII. A game from a set-up position is read and marked `from_position`; a position with more pieces than a game can reach is read. A standard game whose castling rights only Chess960 castling can hold is replayed with it and marked `chess960_castling`; when that start is one of the 960, the game is Chess960. A Chess960 game is `from_position` when its whole start is not one of the 960, compared position for position.
+
+A game that cannot be read is reported with the reason: an unknown variant, a bad start position, a move that does not replay (with its ply, move number, side and the move in printable ASCII), or text that ends inside a tag, a comment or a variation. The games around it still load.
+
+A brace comment runs to its closing brace. Inside a game, tags and moves written in a comment are never read. A comment after a game's result is outside any game, so tags written there start a new game, as they would anywhere between games.
+
+The reader never panics and its work is linear in the input.
+
 ## Chess960
 
 Start positions use Scharnagl numbering, 0 to 959. Number 518 is the classical position. The back rank is built in this order: the light-square bishop, the dark-square bishop, the queen, the two knights (from a table of ten placements), then rook, king, rook in the squares left, so the king always sits between the rooks.

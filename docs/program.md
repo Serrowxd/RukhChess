@@ -18,6 +18,7 @@ The modules:
 - `open.rs` opens the board in a window or the default browser.
 - `boards.rs` restores the saved boards at start and runs the saver.
 - `safe.rs` is the safe file write and the data folder's lock.
+- `coach.rs` and `coach/` are the coach folder and its routes; see `coach.md`.
 
 ## Finding the built board
 
@@ -170,6 +171,12 @@ Every route, including the WebSocket upgrade and `/mcp`, goes through one guard.
 
 `Host` must appear exactly once and `Origin` at most once. A repeated header could carry a foreign value behind an allowed one.
 
+## The coach routes
+
+`POST /api/coach/import/text`, `POST /api/coach/names` and `POST /api/coach/import/undo` store games pasted or dropped as text in `<data dir>/coach/`. Behind the guard each also needs the header `X-Rukh: 1` and its own content type. The text route takes up to 32 MiB; the two JSON routes take up to 64 KiB. The routes, the folder and the limits are in `coach.md`.
+
+The coach writes only in a program that holds the data folder's lock. `boards::open` says which case holds (`FolderUse`): no data folder, the folder is ours, another Rukh has it on a given port, or the folder could not be used, and `start()` hands that to the coach. Its file work runs on blocking threads, one call at a time, never under the hub lock.
+
 ## Static files
 
 Files are served from the web folder on disk. `/` is `index.html`; when that file is missing, `/` explains how to build the board.
@@ -292,6 +299,6 @@ Every decision goes through the `System` trait. The tests use a fake that record
 
 `src/tests.rs` runs the real server on a free port inside the test process and talks to it over real HTTP and WebSockets. Raw HTTP requests are written by hand so a test controls the exact path and `Host` header.
 
-These tests start the server with no data folder, so they write nothing. `src/tests/saving.rs` gives each test its own fresh folder under the system temp folder and removes it at the end. No test reaches the default data folder.
+These tests start the server with no data folder, so they write nothing. `src/tests/saving.rs` and `src/tests/coach.rs` give each test its own fresh folder under the system temp folder and remove it at the end. No test reaches the default data folder.
 
 Some saving tests hold a file open so that others cannot touch it, which only Windows enforces; they run on Windows only. The hub counts file writes, and writes made while its lock is held, only in test builds.
